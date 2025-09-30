@@ -232,7 +232,9 @@ class WildJackpotMachine(SlotMachine):
 
     def jackpot_contribution(self, bet: int) -> int:
         contribution = int(bet * self._jackpot_percent)
-        return contribution if contribution > 0 else (1 if bet > 0 else 0)
+        if contribution <= 0 and bet > 0:
+            contribution = 5
+        return contribution
 
 
 class PirateMachine(SlotMachine):

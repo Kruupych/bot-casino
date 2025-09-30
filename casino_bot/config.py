@@ -102,6 +102,7 @@ class Settings:
                 "triple_payouts": {"🐍": 20, "🐞": 16, "👁️": 12, "🏺": 10, "𓇶": 6, "🦂": 6},
                 "double_payouts": {"🐍": 2, "🐞": 2, "👁️": 2, "🏺": 2, "𓇶": 1, "🦂": 1},
                 "jackpot_multiplier": 60,
+                "jackpot_seed": 5000,
             },
             {
                 "key": "pirate",
@@ -120,7 +121,18 @@ class Settings:
                 "triple_payouts": {"🪐": 25, "🚀": 18, "👽": 14, "☄️": 10, "✨": 8, "🌠": 6},
                 "double_payouts": {"🪐": 2, "🚀": 2, "👽": 2, "☄️": 2, "✨": 1, "🌠": 1},
                 "jackpot_multiplier": 75,
+                "jackpot_seed": 8000,
             },
+        )
+    )
+    shop_items: Sequence[dict[str, Any]] = field(
+        default_factory=lambda: (
+            {"id": 1, "type": "title", "name": "Карточный шулер", "price": 10_000},
+            {"id": 2, "type": "title", "name": "Любимчик Фортуны", "price": 50_000},
+            {"id": 3, "type": "title", "name": "Банкрот со стажем", "price": 100},
+            {"id": 10, "type": "balance_icon", "name": "Мешок с деньгами", "price": 5_000, "value": "💸"},
+            {"id": 11, "type": "balance_icon", "name": "Пачка баксов", "price": 7_500, "value": "💵"},
+            {"id": 12, "type": "balance_icon", "name": "Бриллиант", "price": 100_000, "value": "💎"},
         )
     )
 
@@ -133,6 +145,7 @@ class Settings:
         slot_reel = _sequence_env("CASINO_SLOT_REEL", cls().slot_reel)
         special_payouts = _payouts_env("CASINO_SPECIAL_PAYOUTS", cls().special_payouts)
         slot_machines = _machines_env("CASINO_SLOT_MACHINES", cls().slot_machines)
+        shop_items = cls().shop_items
         return cls(
             starting_balance=starting_balance,
             daily_bonus=daily_bonus,
@@ -141,6 +154,7 @@ class Settings:
             slot_reel=slot_reel,
             special_payouts=special_payouts,
             slot_machines=slot_machines,
+            shop_items=shop_items,
         )
 
 

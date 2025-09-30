@@ -59,6 +59,9 @@ class CasinoBot:
         self._slot_machines: dict[str, SlotMachine] = {}
         self._default_slot_key = "fruit"
         self._configure_machines()
+        self._shop_items = {item["id"]: item for item in settings.shop_items}
+        self._title_items = {item_id: item for item_id, item in self._shop_items.items() if item.get("type") == "title"}
+        self._icon_items = {item_id: item for item_id, item in self._shop_items.items() if item.get("type") == "balance_icon"}
 
     def register(self, application: Application) -> None:
         application.add_handler(CommandHandler("start_casino", self.start_casino))
@@ -68,6 +71,10 @@ class CasinoBot:
         application.add_handler(CommandHandler("give", self.give))
         application.add_handler(CommandHandler(["slots", "s"], self.slots))
         application.add_handler(CommandHandler(["jackpot", "jp"], self.jackpot))
+        application.add_handler(CommandHandler("shop", self.shop))
+        application.add_handler(CommandHandler("inventory", self.inventory))
+        application.add_handler(CommandHandler("buy", self.buy))
+        application.add_handler(CommandHandler("use", self.use_item))
         application.add_handler(ChatMemberHandler(self.welcome_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
     async def _sync_username(self, telegram_user, record: User | None) -> None:
@@ -109,7 +116,12 @@ class CasinoBot:
         await self._sync_username(tg_user, user)
 
         display_name = format_username(user, tg_user.full_name)
-        await update.message.reply_text(f"👤 {display_name}, ваш баланс: 💰 {user.balance} фишек.")
+        title, icon = await self._get_display_attributes(tg_user.id)
+        title_text = f" ({title})" if title else ""
+        icon_text = f"{icon} " if icon else ""
+        await update.message.reply_text(
+            f"👤 {display_name}{title_text}, ваш баланс: {icon_text}{user.balance} фишек."
+        )
 
     async def daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         tg_user = update.effective_user
@@ -153,9 +165,12 @@ class CasinoBot:
         lines = ["🏆 Таблица лидеров нашего казино:\n"]
         for idx, user in enumerate(top_users, start=1):
             name = format_username(user, fallback=f"Игрок {user.telegram_id}")
+            title, icon = await self._get_display_attributes(user.telegram_id)
+            title_text = f" ({title})" if title else ""
+            icon_text = f"{icon} " if icon else ""
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(idx)
             prefix = f"{medal} " if medal else f"{idx}. "
-            lines.append(f"{prefix}{name} - {user.balance} фишек")
+            lines.append(f"{prefix}{name}{title_text} - {icon_text}{user.balance} фишек")
         await update.message.reply_text("\n".join(lines))
 
     async def give(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,6 +234,155 @@ class CasinoBot:
                 f"Ваш новый баланс: {sender_balance} фишек."
             )
         )
+
+    async def shop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.message
+        if message is None:
+            return
+        if not self._shop_items:
+            await self._safe_reply(message, "Магазин пока пуст.")
+            return
+        categories = (
+            ("title", "🎖 Титулы"),
+            ("balance_icon", "💠 Иконки баланса"),
+        )
+        lines = ["🛍 Магазин статуса и привилегий:", ""]
+        for key, label in categories:
+            items = [item for item in self._shop_items.values() if item.get("type") == key]
+            if not items:
+                continue
+            lines.append(label + ":")
+            for item in sorted(items, key=lambda i: i.get("price", 0)):
+                suffix = ""
+                if key == "balance_icon" and item.get("value"):
+                    suffix = f" ({item['value']})"
+                lines.append(f"[{item['id']}] {item['name']}{suffix} — {item['price']} фишек")
+            lines.append("")
+        await self._safe_reply(message, "\n".join(line for line in lines if line), reply=False)
+
+    async def inventory(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.message
+        tg_user = update.effective_user
+        if message is None or tg_user is None:
+            return
+        owned = await with_db(self.db.get_inventory, tg_user.id)
+        if not owned:
+            await self._safe_reply(message, "Ваш инвентарь пуст. Загляните в /shop.")
+            return
+        profile = await with_db(self.db.get_profile, tg_user.id)
+        active_title = profile.get("title_id")
+        active_icon = profile.get("balance_icon_id")
+        title_lines: list[str] = []
+        icon_lines: list[str] = []
+        for item_id in owned:
+            item = self._shop_items.get(item_id)
+            if not item:
+                continue
+            entry = f"[{item_id}] {item['name']}"
+            if item.get("type") == "title":
+                if item_id == active_title:
+                    entry += " (активно)"
+                title_lines.append(entry)
+            elif item.get("type") == "balance_icon":
+                if item.get("value"):
+                    entry += f" ({item['value']})"
+                if item_id == active_icon:
+                    entry += " (активно)"
+                icon_lines.append(entry)
+        lines = ["🎒 Ваши предметы:", ""]
+        if title_lines:
+            lines.append("🎖 Титулы:")
+            lines.extend(title_lines)
+            lines.append("")
+        if icon_lines:
+            lines.append("💠 Иконки баланса:")
+            lines.extend(icon_lines)
+            lines.append("")
+        lines.append("Используйте /use <ID> для активации или /use reset_title /use reset_icon для сброса.")
+        await self._safe_reply(message, "\n".join(line for line in lines if line), reply=False)
+
+    async def buy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.message
+        tg_user = update.effective_user
+        if message is None or tg_user is None:
+            return
+        if not context.args:
+            await self._safe_reply(message, "Используйте: /buy <ID товара>.")
+            return
+        try:
+            item_id = int(context.args[0])
+        except ValueError:
+            await self._safe_reply(message, "ID товара должен быть числом.")
+            return
+        item = self._shop_items.get(item_id)
+        if not item:
+            await self._safe_reply(message, "Товар с таким ID не найден.")
+            return
+        user = await with_db(self.db.get_user, tg_user.id)
+        if not user:
+            await self._safe_reply(message, "Сначала зарегистрируйтесь командой /start_casino.")
+            return
+        if await with_db(self.db.has_item, tg_user.id, item_id):
+            await self._safe_reply(message, "Этот предмет уже в вашем инвентаре.")
+            return
+        price = int(item.get("price", 0))
+        try:
+            new_balance = await with_db(self.db.adjust_balance, tg_user.id, -price)
+        except ValueError:
+            await self._safe_reply(message, "Недостаточно фишек для покупки.")
+            return
+        await with_db(self.db.add_item_to_inventory, tg_user.id, item_id)
+        _, icon = await self._get_display_attributes(tg_user.id)
+        lines = [
+            f"Покупка оформлена! Вы приобрели «{item['name']}» за {price} фишек.",
+            self._format_balance_line(new_balance, icon),
+        ]
+        await self._safe_reply(message, "\n".join(lines), reply=False)
+
+    async def use_item(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.message
+        tg_user = update.effective_user
+        if message is None or tg_user is None:
+            return
+        if not context.args:
+            await self._safe_reply(
+                message,
+                "Используйте: /use <ID>, /use reset_title или /use reset_icon.",
+            )
+            return
+        arg = context.args[0].lower()
+        if arg in {"reset_title", "title_off"}:
+            await with_db(self.db.set_active_title, tg_user.id, None)
+            await self._safe_reply(message, "Титул сброшен.")
+            return
+        if arg in {"reset_icon", "icon_off"}:
+            await with_db(self.db.set_active_icon, tg_user.id, None)
+            await self._safe_reply(message, "Иконка баланса сброшена.")
+            return
+        try:
+            item_id = int(arg)
+        except ValueError:
+            await self._safe_reply(message, "ID товара должен быть числом.")
+            return
+        item = self._shop_items.get(item_id)
+        if not item:
+            await self._safe_reply(message, "Предмет не найден.")
+            return
+        if not await with_db(self.db.has_item, tg_user.id, item_id):
+            await self._safe_reply(message, "Сначала купите этот предмет в /shop.")
+            return
+        item_type = item.get("type")
+        if item_type == "title":
+            await with_db(self.db.set_active_title, tg_user.id, item_id)
+            await self._safe_reply(message, f"Титул «{item['name']}» активирован.")
+        elif item_type == "balance_icon":
+            await with_db(self.db.set_active_icon, tg_user.id, item_id)
+            await self._safe_reply(
+                message,
+                f"Иконка баланса установлена на {item.get('value', '')}.",
+            )
+        else:
+            await self._safe_reply(message, "Этот предмет нельзя использовать.")
 
     async def slots(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
@@ -295,7 +459,8 @@ class CasinoBot:
                     await with_db(self.db.reset_jackpot, machine.key)
                 current_jackpot = await with_db(self.db.get_jackpot, machine.key)
 
-            final_lines = [outcome.message, f"Ваш баланс: {new_balance} фишек."]
+            _, icon = await self._get_display_attributes(tg_user.id)
+            final_lines = [outcome.message, self._format_balance_line(new_balance, icon)]
             if machine.supports_jackpot() and current_jackpot is not None:
                 final_lines.append(f"Текущий джекпот: {current_jackpot} фишек")
             final_text = "\n".join(final_lines)
@@ -413,6 +578,26 @@ class CasinoBot:
         )
         return "\n".join(lines)
 
+    async def _get_display_attributes(self, telegram_id: int) -> tuple[str | None, str | None]:
+        profile = await with_db(self.db.get_profile, telegram_id)
+        title = None
+        icon = None
+        title_id = profile.get("title_id") if profile else None
+        icon_id = profile.get("balance_icon_id") if profile else None
+        if title_id:
+            item = self._title_items.get(title_id)
+            if item:
+                title = item.get("name")
+        if icon_id:
+            item = self._icon_items.get(icon_id)
+            if item:
+                icon = item.get("value") or ""
+        return title, icon
+
+    def _format_balance_line(self, balance: int, icon: str | None) -> str:
+        icon_text = f"{icon} " if icon else ""
+        return f"Ваш баланс: {icon_text}{balance} фишек."
+
     async def _safe_reply(self, message, text: str, *, reply: bool = True):
         for attempt in range(3):
             try:
@@ -474,6 +659,10 @@ class CasinoBot:
         summary = f"Бесплатные вращения завершены! Общий выигрыш: {total_winnings} фишек."
         spin_texts.append("")
         spin_texts.append(summary)
+        user = await with_db(self.db.get_user, telegram_id)
+        if user:
+            _, icon = await self._get_display_attributes(telegram_id)
+            spin_texts.append(self._format_balance_line(user.balance, icon))
         final_text = "\n".join(spin_texts)
         if base_message and await self._safe_edit(base_message, final_text):
             return
