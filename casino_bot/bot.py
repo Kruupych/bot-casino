@@ -5,7 +5,6 @@ import logging
 import os
 import random
 import time
-from typing import Sequence
 
 from telegram import Update
 from telegram.error import RetryAfter, TelegramError
@@ -20,6 +19,7 @@ from telegram.ext import (
 from .config import Settings
 from .database import CasinoDatabase, User
 from .env import load_dotenv
+from .slots import FruitMachine, PharaohMachine, SlotMachine
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,10 @@ class CasinoBot:
         self.db = db
         self.settings = settings
         self._slot_lock = asyncio.Lock()
+        self._rng = random.Random()
+        self._slot_machines: dict[str, SlotMachine] = {}
+        self._default_slot_key = "fruit"
+        self._configure_machines()
 
     def register(self, application: Application) -> None:
         application.add_handler(CommandHandler("start_casino", self.start_casino))
@@ -62,7 +66,7 @@ class CasinoBot:
         application.add_handler(CommandHandler(["top", "leaderboard"], self.leaderboard))
         application.add_handler(CommandHandler("daily", self.daily))
         application.add_handler(CommandHandler("give", self.give))
-        application.add_handler(CommandHandler("slots", self.slots))
+        application.add_handler(CommandHandler(["slots", "s"], self.slots))
         application.add_handler(ChatMemberHandler(self.welcome_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
     async def _sync_username(self, telegram_user, record: User | None) -> None:
@@ -221,24 +225,35 @@ class CasinoBot:
         if message is None or tg_user is None:
             return
 
+        args = list(context.args)
+        if args and args[0].lower() in {"help", "?"}:
+            await self._safe_reply(message, self._build_slots_help(), reply=False)
+            return
+
+        try:
+            machine_key, bet_arg = self._parse_slot_arguments(args)
+        except ValueError:
+            help_text = self._build_slots_help()
+            await self._safe_reply(
+                message,
+                "Неизвестный автомат. Используйте `/slots help` для справки.\n\n" + help_text,
+                reply=False,
+            )
+            return
         async with self._slot_lock:
+            machine = self._slot_machines.get(machine_key, self._slot_machines[self._default_slot_key])
+
             user = await with_db(self.db.get_user, tg_user.id)
             if not user:
                 await self._safe_reply(message, "Сначала зарегистрируйтесь командой /start_casino.")
                 return
+            if user.balance <= 0:
+                await self._safe_reply(message, "На вашем счету нет фишек. Пополните баланс командой /daily или переводом.")
+                return
             await self._sync_username(tg_user, user)
 
-            if context.args:
-                try:
-                    bet = int(context.args[0])
-                except ValueError:
-                    await self._safe_reply(message, "Ставка должна быть положительным числом.")
-                    return
-            else:
-                auto_bet = int(user.balance * 0.05)
-                bet = max(1, min(1000, auto_bet if auto_bet > 0 else 1))
-
-            if bet <= 0:
+            bet = self._resolve_bet(user.balance, bet_arg)
+            if bet is None:
                 await self._safe_reply(message, "Ставка должна быть положительным числом.")
                 return
 
@@ -248,31 +263,28 @@ class CasinoBot:
                 await self._safe_reply(message, "Недостаточно фишек для этой ставки.")
                 return
 
-            spin_message = await self._safe_reply(message, "🎰 Крутим барабан...", reply=False)
+            spin_message = await self._safe_reply(message, f"🎰 {machine.title}: вращаем барабаны...", reply=False)
             frame_delay = 0.9
             if spin_message:
                 for _ in range(3):
                     await asyncio.sleep(frame_delay)
-                    temp_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
+                    temp_symbols = [self._rng.choice(machine.reel) for _ in range(3)]
                     if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
                         spin_message = None
                         break
             else:
                 await asyncio.sleep(frame_delay * 3)
 
-            final_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
-
-            multiplier = self._payout_multiplier(tuple(final_symbols))
-            winnings = bet * multiplier
-            if winnings:
-                new_balance = await with_db(self.db.adjust_balance, tg_user.id, winnings)
+            outcome = machine.spin(bet, self._rng)
+            if outcome.winnings:
+                new_balance = await with_db(self.db.adjust_balance, tg_user.id, outcome.winnings)
             else:
                 new_balance = balance_after_bet
 
-            result_text = self._build_slots_result_text(final_symbols, winnings, new_balance)
-            if spin_message and await self._safe_edit(spin_message, result_text):
+            final_text = f"{outcome.message}\nВаш баланс: {new_balance} фишек."
+            if spin_message and await self._safe_edit(spin_message, final_text):
                 return
-            await self._safe_reply(message, result_text)
+            await self._safe_reply(message, final_text)
 
     async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_member = update.my_chat_member
@@ -299,37 +311,61 @@ class CasinoBot:
         )
         await context.bot.send_message(chat.id, commands)
 
-    def _payout_multiplier(self, symbols: tuple[str, str, str]) -> int:
-        special = self.settings.special_payouts.get(symbols)
-        if special is not None:
-            return special
-        if symbols.count(symbols[0]) == 3:
-            return 5
-        if len({symbols[0], symbols[1], symbols[2]}) == 2:
-            return 2
-        return 0
+    def _configure_machines(self) -> None:
+        fruit = FruitMachine(self.settings.slot_reel, self.settings.special_payouts)
+        pharaoh = PharaohMachine()
+        self._slot_machines = {
+            fruit.key: fruit,
+            pharaoh.key: pharaoh,
+        }
+        self._default_slot_key = fruit.key
 
-    def _build_slots_result_text(self, symbols: Sequence[str], winnings: int, new_balance: int) -> str:
-        header = f"[ {' | '.join(symbols)} ]"
-        if winnings == 0:
-            return f"{header}\nУвы, в этот раз не повезло. Попробуйте еще раз! Ваш баланс: {new_balance} фишек."
-        if tuple(symbols) == ("💎", "💎", "💎"):
-            return (
-                f"{header}\n💥 ДЖЕКПОТ! 💥 Вы выиграли {winnings} фишек! Ваш новый баланс: {new_balance} фишек."
+    def _parse_slot_arguments(self, args: list[str]) -> tuple[str, str | None]:
+        machine_key = self._default_slot_key
+        bet_arg: str | None = None
+        if not args:
+            return machine_key, None
+
+        first = args[0].lower()
+        if first in self._slot_machines:
+            machine_key = first
+            if len(args) > 1:
+                bet_arg = args[1]
+        else:
+            bet_arg = args[0]
+            if bet_arg:
+                try:
+                    int(bet_arg)
+                except ValueError as exc:
+                    raise ValueError(first) from exc
+        return machine_key, bet_arg
+
+    def _resolve_bet(self, balance: int, bet_arg: str | None) -> int | None:
+        if bet_arg is not None:
+            try:
+                bet = int(bet_arg)
+            except ValueError:
+                return None
+            return bet if bet > 0 else None
+
+        auto_bet = int(balance * 0.05)
+        bet = max(1, min(1000, auto_bet if auto_bet > 0 else 1))
+        return bet if bet > 0 else None
+
+    def _build_slots_help(self) -> str:
+        lines = ["🎰 Зал игровых автоматов:", ""]
+        for machine in self._slot_machines.values():
+            lines.append(
+                f"• {machine.title} (`/slots {machine.key}`) — {machine.description}"
             )
-        if tuple(symbols) == ("🍀", "🍀", "🍀"):
-            return (
-                f"{header}\nУдача на вашей стороне! Три клевера приносят {winnings} фишек. Баланс: {new_balance} фишек."
-            )
-        if tuple(symbols) == ("🔔", "🔔", "🔔"):
-            return (
-                f"{header}\n🔔 Звон монет! 🔔 Вы выиграли {winnings} фишек. Баланс: {new_balance} фишек."
-            )
-        if len(set(symbols)) == 1:
-            return f"{header}\nТри совпадения! Вы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
-        if len(set(symbols)) == 2:
-            return f"{header}\nДва совпадения! Вы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
-        return f"{header}\nВы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
+        lines.append("")
+        lines.append(
+            "Используйте `/slots <автомат> <ставка>` или кратко `/s <автомат> <ставка>`."
+        )
+        lines.append(
+            "Если автомат не указан, используется Фруктовый Коктейль. Если ставка не указана — 5% от баланса (мин. 1, макс. 1000)."
+        )
+        return "\n".join(lines)
 
     async def _safe_reply(self, message, text: str, *, reply: bool = True):
         for attempt in range(3):
