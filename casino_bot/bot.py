@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+from typing import Sequence
 
 from telegram import Update
 from telegram.error import RetryAfter, TelegramError
@@ -227,13 +228,14 @@ class CasinoBot:
 
         args = list(context.args)
         if args and args[0].lower() in {"help", "?"}:
-            await self._safe_reply(message, self._build_slots_help(), reply=False)
+            help_text = await self._build_slots_help()
+            await self._safe_reply(message, help_text, reply=False)
             return
 
         try:
             machine_key, bet_arg = self._parse_slot_arguments(args)
         except ValueError:
-            help_text = self._build_slots_help()
+            help_text = await self._build_slots_help()
             await self._safe_reply(
                 message,
                 "Неизвестный автомат. Используйте `/slots help` для справки.\n\n" + help_text,
@@ -263,6 +265,15 @@ class CasinoBot:
                 await self._safe_reply(message, "Недостаточно фишек для этой ставки.")
                 return
 
+            jackpot_balance = 0
+            contribution = 0
+            if machine.supports_jackpot():
+                contribution = machine.jackpot_contribution(bet)
+                if contribution:
+                    jackpot_balance = await with_db(self.db.add_to_jackpot, machine.key, contribution)
+                else:
+                    jackpot_balance = await with_db(self.db.get_jackpot, machine.key)
+
             spin_message = await self._safe_reply(message, f"🎰 {machine.title}: вращаем барабаны...", reply=False)
             frame_delay = 0.9
             if spin_message:
@@ -275,13 +286,28 @@ class CasinoBot:
             else:
                 await asyncio.sleep(frame_delay * 3)
 
-            outcome = machine.spin(bet, self._rng)
+            outcome = machine.spin(bet, self._rng, jackpot_balance=jackpot_balance)
             if outcome.winnings:
                 new_balance = await with_db(self.db.adjust_balance, tg_user.id, outcome.winnings)
             else:
                 new_balance = balance_after_bet
 
-            final_text = f"{outcome.message}\nВаш баланс: {new_balance} фишек."
+            current_jackpot = None
+            if machine.supports_jackpot():
+                if outcome.jackpot_win > 0:
+                    await with_db(self.db.reset_jackpot, machine.key)
+                current_jackpot = await with_db(self.db.get_jackpot, machine.key)
+
+            final_lines = [outcome.message, f"Ваш баланс: {new_balance} фишек."]
+            if machine.supports_jackpot():
+                info_parts = []
+                if contribution:
+                    info_parts.append(f"в фонд добавлено {contribution} фишек")
+                if current_jackpot is not None:
+                    info_parts.append(f"текущий джекпот: {current_jackpot} фишек")
+                if info_parts:
+                    final_lines.append("; ".join(info_parts))
+            final_text = "\n".join(final_lines)
             if spin_message and await self._safe_edit(spin_message, final_text):
                 return
             await self._safe_reply(message, final_text)
@@ -312,13 +338,92 @@ class CasinoBot:
         await context.bot.send_message(chat.id, commands)
 
     def _configure_machines(self) -> None:
-        fruit = FruitMachine(self.settings.slot_reel, self.settings.special_payouts)
-        pharaoh = PharaohMachine()
-        self._slot_machines = {
-            fruit.key: fruit,
-            pharaoh.key: pharaoh,
-        }
-        self._default_slot_key = fruit.key
+        machines: dict[str, SlotMachine] = {}
+        for cfg in self.settings.slot_machines:
+            machine = self._create_machine_from_config(cfg)
+            machines[machine.key] = machine
+        if not machines:
+            fruit = FruitMachine(self.settings.slot_reel, self.settings.special_payouts)
+            machines[fruit.key] = fruit
+        self._slot_machines = machines
+        self._default_slot_key = next(iter(machines))
+
+    def _create_machine_from_config(self, cfg: dict) -> SlotMachine:
+        machine_type = (cfg.get("type") or cfg.get("key") or "").lower()
+        key = (cfg.get("key") or machine_type).lower()
+        if not key:
+            raise ValueError("Slot machine config must include 'key'")
+        if machine_type == "pharaoh":
+            try:
+                jackpot_percent = float(cfg.get("jackpot_percent", 0.01))
+            except (TypeError, ValueError):
+                jackpot_percent = 0.01
+            machine = PharaohMachine(jackpot_percent=jackpot_percent)
+        else:
+            reel = self._normalize_reel(cfg.get("reel"))
+            payouts = self._normalize_payouts(cfg.get("special_payouts"))
+            machine = FruitMachine(reel, payouts)
+        machine.key = key
+        if "title" in cfg:
+            machine.title = cfg["title"]
+        if "description" in cfg:
+            machine.description = cfg["description"]
+        return machine
+
+    def _normalize_reel(self, raw) -> Sequence[str]:
+        if not raw:
+            return tuple(self.settings.slot_reel)
+        if isinstance(raw, (list, tuple)):
+            return tuple(str(item) for item in raw if str(item))
+        if isinstance(raw, str):
+            parts = [part.strip() for part in raw.split(",") if part.strip()]
+            if parts:
+                return tuple(parts)
+        return tuple(self.settings.slot_reel)
+
+    def _normalize_payouts(self, raw) -> dict[tuple[str, str, str], int]:
+        if not raw:
+            return dict(self.settings.special_payouts)
+        result: dict[tuple[str, str, str], int] = {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                triplet = self._normalize_triplet(key)
+                if triplet is None:
+                    continue
+                try:
+                    result[triplet] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        elif isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                triplet = self._normalize_triplet(item.get("symbols"))
+                if triplet is None:
+                    continue
+                try:
+                    multiplier = int(item.get("multiplier"))
+                except (TypeError, ValueError):
+                    continue
+                result[triplet] = multiplier
+        if not result:
+            return dict(self.settings.special_payouts)
+        return result
+
+    def _normalize_triplet(self, raw) -> tuple[str, str, str] | None:
+        if isinstance(raw, (list, tuple)) and len(raw) == 3:
+            return tuple(str(item) for item in raw)
+        if isinstance(raw, str):
+            cleaned = raw.strip().strip("[]")
+            if "," in cleaned:
+                parts = [part.strip().strip('"').strip("'") for part in cleaned.split(",") if part.strip()]
+                if len(parts) == 3:
+                    return tuple(parts)
+            if len(cleaned) >= 3:
+                chars = list(cleaned)
+                if len(chars) >= 3:
+                    return tuple(chars[:3])
+        return None
 
     def _parse_slot_arguments(self, args: list[str]) -> tuple[str, str | None]:
         machine_key = self._default_slot_key
@@ -352,12 +457,14 @@ class CasinoBot:
         bet = max(1, min(1000, auto_bet if auto_bet > 0 else 1))
         return bet if bet > 0 else None
 
-    def _build_slots_help(self) -> str:
+    async def _build_slots_help(self) -> str:
         lines = ["🎰 Зал игровых автоматов:", ""]
         for machine in self._slot_machines.values():
-            lines.append(
-                f"• {machine.title} (`/slots {machine.key}`) — {machine.description}"
-            )
+            line = f"• {machine.title} (`/slots {machine.key}`) — {machine.description}"
+            if machine.supports_jackpot():
+                jackpot_amount = await with_db(self.db.get_jackpot, machine.key)
+                line += f" (джекпот: {jackpot_amount} фишек)"
+            lines.append(line)
         lines.append("")
         lines.append(
             "Используйте `/slots <автомат> <ставка>` или кратко `/s <автомат> <ставка>`."

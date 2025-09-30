@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Sequence
 
 
 def _int_env(name: str, default: int) -> int:
@@ -47,6 +47,23 @@ def _payouts_env(name: str, default: dict[tuple[str, str, str], int]) -> dict[tu
     return payouts or default
 
 
+def _machines_env(name: str, default: Sequence[dict[str, Any]]) -> Sequence[dict[str, Any]]:
+    raw = os.getenv(name)
+    if not raw:
+        return tuple(default)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return tuple(default)
+    if isinstance(data, list):
+        filtered: list[dict[str, Any]] = []
+        for item in data:
+            if isinstance(item, dict) and "key" in item:
+                filtered.append(item)
+        return tuple(filtered) if filtered else tuple(default)
+    return tuple(default)
+
+
 @dataclass(frozen=True)
 class Settings:
     starting_balance: int = 1000
@@ -61,6 +78,27 @@ class Settings:
             ("🔔", "🔔", "🔔"): 10,
         }
     )
+    slot_machines: Sequence[dict[str, Any]] = field(
+        default_factory=lambda: (
+            {
+                "key": "fruit",
+                "title": "Фруктовый Коктейль",
+                "description": "Классический автомат с простыми правилами и быстрыми выигрышами.",
+                "reel": ("🍒", "🍋", "🍊", "🍇", "💎", "🔔", "🍀"),
+                "special_payouts": {
+                    ("💎", "💎", "💎"): 50,
+                    ("🍀", "🍀", "🍀"): 20,
+                    ("🔔", "🔔", "🔔"): 10,
+                },
+            },
+            {
+                "key": "pharaoh",
+                "title": "Золото Фараона",
+                "description": "Автомат с диким символом Фараона. Wild заменяет любые символы и удваивает выигрыш.",
+                "type": "pharaoh",
+            },
+        )
+    )
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -70,6 +108,7 @@ class Settings:
         leaderboard_limit = _int_env("CASINO_LEADERBOARD_LIMIT", cls.leaderboard_limit)
         slot_reel = _sequence_env("CASINO_SLOT_REEL", cls().slot_reel)
         special_payouts = _payouts_env("CASINO_SPECIAL_PAYOUTS", cls().special_payouts)
+        slot_machines = _machines_env("CASINO_SLOT_MACHINES", cls().slot_machines)
         return cls(
             starting_balance=starting_balance,
             daily_bonus=daily_bonus,
@@ -77,6 +116,7 @@ class Settings:
             leaderboard_limit=leaderboard_limit,
             slot_reel=slot_reel,
             special_payouts=special_payouts,
+            slot_machines=slot_machines,
         )
 
 

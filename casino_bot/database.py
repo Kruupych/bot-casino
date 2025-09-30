@@ -50,6 +50,14 @@ class CasinoDatabase:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jackpots (
+                    machine_key TEXT PRIMARY KEY,
+                    amount INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
 
     def get_user(self, telegram_id: int) -> Optional[User]:
         with self._connect() as conn:
@@ -184,3 +192,45 @@ class CasinoDatabase:
             )
             for row in rows
         ]
+
+    def add_to_jackpot(self, machine_key: str, amount: int) -> int:
+        if amount <= 0:
+            return self.get_jackpot(machine_key)
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT amount FROM jackpots WHERE machine_key = ?",
+                (machine_key,),
+            ).fetchone()
+            if current is None:
+                conn.execute(
+                    "INSERT INTO jackpots (machine_key, amount) VALUES (?, ?)",
+                    (machine_key, amount),
+                )
+                return amount
+            new_amount = current["amount"] + amount
+            conn.execute(
+                "UPDATE jackpots SET amount = ? WHERE machine_key = ?",
+                (new_amount, machine_key),
+            )
+            return new_amount
+
+    def reset_jackpot(self, machine_key: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT amount FROM jackpots WHERE machine_key = ?",
+                (machine_key,),
+            ).fetchone()
+            amount = row["amount"] if row else 0
+            conn.execute(
+                "REPLACE INTO jackpots (machine_key, amount) VALUES (?, 0)",
+                (machine_key,),
+            )
+            return amount
+
+    def get_jackpot(self, machine_key: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT amount FROM jackpots WHERE machine_key = ?",
+                (machine_key,),
+            ).fetchone()
+            return row["amount"] if row else 0
