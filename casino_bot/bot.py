@@ -801,6 +801,7 @@ class CasinoBot:
                 edited_message = spin_message
             else:
                 edited_message = await self._safe_reply(message, final_text)
+            await asyncio.sleep(1.0)
 
             if outcome.free_spins > 0:
                 await self._run_free_spins(
