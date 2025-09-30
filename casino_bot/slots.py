@@ -255,7 +255,7 @@ class PirateMachine(SlotMachine):
             return (0, "Вы нашли карту сокровищ! Запускаются 10 бесплатных вращений!", 0, {"free_spins": 10})
 
         if symbols[0] == symbols[1] == symbols[2]:
-            multiplier = {"🏴‍☠️": 30, "🦜": 20, "💣": 15, "💎": 10, "⚓": 6}.get(symbols[0], 8)
+            multiplier = {"🏴‍☠️": 100, "🦜": 50, "💣": 25, "💎": 15, "⚓": 10}.get(symbols[0], 8)
             winnings = bet * multiplier
             return winnings, f"Три {symbols[0]}! Вы выиграли {winnings} фишек.", 0, {}
 
@@ -265,8 +265,8 @@ class PirateMachine(SlotMachine):
             for symbol, count in counts.items():
                 if count == 2:
                     pair_multiplier = {
-                        "🏴‍☠️": 4,
-                        "🦜": 3,
+                        "🏴‍☠️": 10,
+                        "🦜": 5,
                         "💣": 3,
                         "💎": 2,
                         "⚓": 2,
