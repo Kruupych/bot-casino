@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from .config import Settings
-from .slots import FruitMachine, PharaohMachine, PirateMachine, SlotMachine
+from .slots import FruitMachine, PirateMachine, SlotMachine, WildJackpotMachine
 
 
 class MachineFactory:
@@ -25,21 +25,56 @@ class MachineFactory:
         key = (cfg.get("key") or machine_type).lower()
         if not key:
             raise ValueError("Slot machine config must include 'key'")
-        if machine_type == "pharaoh":
-            jackpot_percent = self._as_float(cfg.get("jackpot_percent"), 0.01)
-            machine = PharaohMachine(jackpot_percent=jackpot_percent)
+        if machine_type in {"pharaoh", "wild", "jackpot"}:
+            machine = self._create_wild_machine(cfg)
         elif machine_type == "pirate":
             machine = PirateMachine()
+            if "title" in cfg:
+                machine.title = cfg["title"]
+            if "description" in cfg:
+                machine.description = cfg["description"]
         else:
             reel = self._normalize_reel(cfg.get("reel"))
             payouts = self._normalize_payouts(cfg.get("special_payouts"))
             machine = FruitMachine(reel, payouts)
+            machine.key = key
+            if "title" in cfg:
+                machine.title = cfg["title"]
+            if "description" in cfg:
+                machine.description = cfg["description"]
+            return machine
         machine.key = key
         if "title" in cfg:
             machine.title = cfg["title"]
         if "description" in cfg:
             machine.description = cfg["description"]
         return machine
+
+    def _create_wild_machine(self, cfg: dict[str, Any]) -> SlotMachine:
+        jackpot_percent = self._as_float(cfg.get("jackpot_percent"), 0.01)
+        reel = self._normalize_reel(cfg.get("reel"))
+        wild_symbol = str(cfg.get("wild_symbol", "🗿"))
+        triple = self._normalize_symbol_map(
+            cfg.get("triple_payouts"),
+            default={"🐍": 20, "🐞": 16, "👁️": 12, "🏺": 10},
+        )
+        double = self._normalize_symbol_map(
+            cfg.get("double_payouts"),
+            default={"🐍": 5, "🐞": 4, "👁️": 3, "🏺": 2},
+        )
+        jackpot_multiplier = int(cfg.get("jackpot_multiplier", 60))
+        jackpot_message = cfg.get("jackpot_message")
+        return WildJackpotMachine(
+            reel,
+            wild_symbol=wild_symbol,
+            jackpot_percent=jackpot_percent,
+            triple_payouts=triple,
+            double_payouts=double,
+            jackpot_multiplier=jackpot_multiplier,
+            jackpot_message=jackpot_message,
+            title=cfg.get("title"),
+            description=cfg.get("description"),
+        )
 
     def _normalize_reel(self, raw) -> Sequence[str]:
         if not raw:
@@ -99,6 +134,26 @@ class MachineFactory:
             return float(raw)
         except (TypeError, ValueError):
             return default
+
+    def _normalize_symbol_map(self, raw, default: dict[str, int]) -> dict[str, int]:
+        if not raw:
+            return dict(default)
+        result: dict[str, int] = {}
+        if isinstance(raw, dict):
+            items = raw.items()
+        elif isinstance(raw, list):
+            items = []
+            for item in raw:
+                if isinstance(item, dict) and "symbol" in item and "multiplier" in item:
+                    items.append((item["symbol"], item["multiplier"]))
+        else:
+            return dict(default)
+        for symbol, value in items:
+            try:
+                result[str(symbol)] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return result or dict(default)
 
 
 __all__ = ["MachineFactory"]

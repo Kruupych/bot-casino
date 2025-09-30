@@ -107,29 +107,49 @@ class FruitMachine(SlotMachine):
         return 0, "Увы, в этот раз не повезло. Попробуйте еще раз!", 0, {}
 
 
-class PharaohMachine(SlotMachine):
-    key = "pharaoh"
-    title = "Золото Фараона"
-    description = "Автомат с диким символом Фараона. Wild заменяет любые символы и удваивает выигрыш."
+class WildJackpotMachine(SlotMachine):
+    key = "jackpot"
+    title = "Дикий Джекпот"
+    description = "Wild-символ заменяет остальные, умножая выигрыш и пополняя джекпот."
 
-    _wild = "🗿"
-    _jackpot_multiplier = 60
-    _triple_payouts = {
-        "🐍": 20,
-        "🐞": 16,
-        "👁️": 12,
-        "🏺": 10,
-    }
-    _double_payouts = {
-        "🐍": 5,
-        "🐞": 4,
-        "👁️": 3,
-        "🏺": 2,
-    }
-
-    def __init__(self, *, jackpot_percent: float = 0.01) -> None:
-        super().__init__(("🐍", "🐞", "👁️", "🏺", self._wild))
+    def __init__(
+        self,
+        reel: Sequence[str] | None = None,
+        *,
+        wild_symbol: str = "🗿",
+        jackpot_percent: float = 0.01,
+        triple_payouts: dict[str, int] | None = None,
+        double_payouts: dict[str, int] | None = None,
+        jackpot_multiplier: int = 60,
+        jackpot_message: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        reel = tuple(reel or ("🐍", "🐞", "👁️", "🏺", wild_symbol))
+        super().__init__(reel)
+        self._wild = wild_symbol
         self._jackpot_percent = max(0.0, jackpot_percent)
+        self._triple_payouts = triple_payouts or {
+            "🐍": 20,
+            "🐞": 16,
+            "👁️": 12,
+            "🏺": 10,
+        }
+        self._double_payouts = double_payouts or {
+            "🐍": 5,
+            "🐞": 4,
+            "👁️": 3,
+            "🏺": 2,
+        }
+        self._jackpot_multiplier = jackpot_multiplier
+        self._jackpot_message = (
+            jackpot_message
+            or "👑 Главный приз! Вы забираете джекпот в {jackpot} фишек + базовый выигрыш {base} (итого {total})."
+        )
+        if title:
+            self.title = title
+        if description:
+            self.description = description
 
     def evaluate(
         self, symbols: tuple[str, str, str], bet: int, jackpot_balance: int
@@ -140,9 +160,7 @@ class PharaohMachine(SlotMachine):
             total = base + jackpot_balance
             return (
                 total,
-                "👑 Три фараона! Вы забираете джекпот в {0} фишек + базовый выигрыш {1} (итого {2}).".format(
-                    jackpot_balance, base, total
-                ),
+                self._jackpot_message.format(jackpot=jackpot_balance, base=base, total=total),
                 jackpot_balance,
                 {},
             )
@@ -154,9 +172,7 @@ class PharaohMachine(SlotMachine):
                 total = base + jackpot_balance
                 return (
                     total,
-                    "👑 Три фараона! Вы забираете джекпот в {0} фишек + базовый выигрыш {1} (итого {2}).".format(
-                        jackpot_balance, base, total
-                    ),
+                    self._jackpot_message.format(jackpot=jackpot_balance, base=base, total=total),
                     jackpot_balance,
                     {},
                 )
@@ -174,11 +190,11 @@ class PharaohMachine(SlotMachine):
                 winnings = bet * multiplier
                 if matches >= 3:
                     return winnings, (
-                        "🗿 Фараон поддержал комбинацию! Три {0} приносят {1} фишек с множителем x2."
-                    ).format(best_symbol, winnings), 0, {}
+                        f"{self._wild} поддержал комбинацию! Три {best_symbol} приносят {winnings} фишек с множителем x2."
+                    ), 0, {}
                 return winnings, (
-                    "🗿 Фараон дополнил ваш выигрыш! Пара {0} приносит {1} фишек с множителем x2."
-                ).format(best_symbol, winnings), 0, {}
+                    f"{self._wild} дополнил ваш выигрыш! Пара {best_symbol} приносит {winnings} фишек с множителем x2."
+                ), 0, {}
 
         if len(set(symbols)) == 1 and symbols[0] != self._wild:
             symbol = symbols[0]
