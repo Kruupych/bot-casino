@@ -565,6 +565,17 @@ class CasinoBot:
             if multiplier <= 1.0 or duration == 0:
                 await self._safe_reply(message, "Этот предмет сейчас не может быть активирован.")
                 return
+            active = await self._get_active_win_boost(tg_user.id)
+            if active and active.get("expires_at", 0) > int(time.time()):
+                remaining = active.get("expires_at", 0) - int(time.time())
+                await self._safe_reply(
+                    message,
+                    (
+                        "Амулет уже активирован. "
+                        f"Подождите {format_timespan(int(remaining))} до окончания действия."
+                    ),
+                )
+                return
             consumed = await with_db(self.db.consume_item, tg_user.id, item_id)
             if not consumed:
                 await self._safe_reply(message, "В вашем инвентаре нет доступных амулетов.")
@@ -593,6 +604,18 @@ class CasinoBot:
             if duration == 0:
                 await self._safe_reply(message, "Подписку пока нельзя активировать.")
                 return
+            current_access = await self._get_analytics_access(tg_user.id)
+            if current_access:
+                remaining = current_access.get("expires_at", 0) - int(time.time())
+                if remaining > 0:
+                    await self._safe_reply(
+                        message,
+                        (
+                            "Подписка уже активна. "
+                            f"Осталось {format_timespan(int(remaining))}."
+                        ),
+                    )
+                    return
             consumed = await with_db(self.db.consume_item, tg_user.id, item_id)
             if not consumed:
                 await self._safe_reply(message, "В вашем инвентаре нет активируемых подписок.")
