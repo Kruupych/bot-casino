@@ -127,12 +127,28 @@ class Settings:
     )
     shop_items: Sequence[dict[str, Any]] = field(
         default_factory=lambda: (
-            {"id": 1, "type": "title", "name": "Карточный шулер", "price": 10_000},
-            {"id": 2, "type": "title", "name": "Любимчик Фортуны", "price": 50_000},
-            {"id": 3, "type": "title", "name": "Банкрот со стажем", "price": 100},
+            {"id": 1, "type": "title", "name": "Банкрот со стажем", "price": 100},
+            {"id": 2, "type": "title", "name": "Карточный шулер", "price": 10_000},
+            {"id": 3, "type": "title", "name": "Любимчик Фортуны", "price": 50_000},
             {"id": 10, "type": "balance_icon", "name": "Мешок с деньгами", "price": 5_000, "value": "💸"},
             {"id": 11, "type": "balance_icon", "name": "Пачка баксов", "price": 7_500, "value": "💵"},
             {"id": 12, "type": "balance_icon", "name": "Бриллиант", "price": 100_000, "value": "💎"},
+            {
+                "id": 20,
+                "type": "credit_line",
+                "name": "Кредитная линия «До получки»",
+                "price": 5_000,
+                "credit_limit": 500,
+            },
+            {
+                "id": 21,
+                "type": "win_boost",
+                "name": "Амулет удачи (15 минут)",
+                "price": 7_500,
+                "duration_seconds": 15 * 60,
+                "multiplier": 1.2,
+                "stackable": True,
+            },
         )
     )
 

@@ -66,6 +66,7 @@ class CasinoDatabase:
                 CREATE TABLE IF NOT EXISTS user_items (
                     user_id INTEGER NOT NULL,
                     item_id INTEGER NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 1,
                     UNIQUE(user_id, item_id)
                 )
                 """
@@ -79,6 +80,27 @@ class CasinoDatabase:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_effects (
+                    user_id INTEGER NOT NULL,
+                    effect_type TEXT NOT NULL,
+                    item_id INTEGER,
+                    expires_at INTEGER,
+                    value REAL,
+                    PRIMARY KEY (user_id, effect_type)
+                )
+                """
+            )
+            try:
+                has_quantity = any(
+                    row["name"] == "quantity"
+                    for row in conn.execute("PRAGMA table_info(user_items)").fetchall()
+                )
+            except sqlite3.DatabaseError:
+                has_quantity = True
+            if not has_quantity:
+                conn.execute("ALTER TABLE user_items ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1")
 
     def get_user(self, telegram_id: int) -> Optional[User]:
         with self._connect() as conn:
@@ -140,7 +162,14 @@ class CasinoDatabase:
                 (new_balance, telegram_id),
             )
 
-    def adjust_balance(self, telegram_id: int, delta: int) -> int:
+    def adjust_balance(
+        self,
+        telegram_id: int,
+        delta: int,
+        *,
+        allow_overdraft: bool = False,
+        overdraft_limit: int = 0,
+    ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
                 "SELECT balance FROM users WHERE telegram_id = ?",
@@ -149,8 +178,10 @@ class CasinoDatabase:
             row = cursor.fetchone()
             if row is None:
                 raise ValueError("User not found")
-            new_balance = row["balance"] + delta
-            if new_balance < 0:
+            current_balance = row["balance"]
+            new_balance = current_balance + delta
+            min_balance = -overdraft_limit if allow_overdraft else 0
+            if new_balance < min_balance:
                 raise ValueError("Insufficient funds")
             conn.execute(
                 "UPDATE users SET balance = ? WHERE telegram_id = ?",
@@ -287,27 +318,68 @@ class CasinoDatabase:
         except Exception:
             return {}
 
-    def add_item_to_inventory(self, telegram_id: int, item_id: int) -> None:
+    def add_item_to_inventory(self, telegram_id: int, item_id: int, *, stackable: bool = False) -> None:
         with self._connect() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO user_items (user_id, item_id) VALUES (?, ?)",
+            row = conn.execute(
+                "SELECT quantity FROM user_items WHERE user_id = ? AND item_id = ?",
                 (telegram_id, item_id),
-            )
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO user_items (user_id, item_id, quantity) VALUES (?, ?, 1)",
+                    (telegram_id, item_id),
+                )
+            elif stackable:
+                conn.execute(
+                    "UPDATE user_items SET quantity = quantity + 1 WHERE user_id = ? AND item_id = ?",
+                    (telegram_id, item_id),
+                )
 
-    def get_inventory(self, telegram_id: int) -> list[int]:
+    def consume_item(self, telegram_id: int, item_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT quantity FROM user_items WHERE user_id = ? AND item_id = ?",
+                (telegram_id, item_id),
+            ).fetchone()
+            if row is None or row["quantity"] <= 0:
+                return False
+            if row["quantity"] == 1:
+                conn.execute(
+                    "DELETE FROM user_items WHERE user_id = ? AND item_id = ?",
+                    (telegram_id, item_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE user_items SET quantity = quantity - 1 WHERE user_id = ? AND item_id = ?",
+                    (telegram_id, item_id),
+                )
+            return True
+
+    def get_inventory(self, telegram_id: int) -> list[tuple[int, int]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT item_id FROM user_items WHERE user_id = ? ORDER BY item_id", (telegram_id,)
+                "SELECT item_id, quantity FROM user_items WHERE user_id = ? ORDER BY item_id",
+                (telegram_id,),
             ).fetchall()
-        return [row["item_id"] for row in rows]
+        return [(row["item_id"], row["quantity"]) for row in rows]
 
     def has_item(self, telegram_id: int, item_id: int) -> bool:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM user_items WHERE user_id = ? AND item_id = ?",
+                "SELECT quantity FROM user_items WHERE user_id = ? AND item_id = ?",
                 (telegram_id, item_id),
             ).fetchone()
-            return row is not None
+            return bool(row and row["quantity"] > 0)
+
+    def get_item_quantity(self, telegram_id: int, item_id: int) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT quantity FROM user_items WHERE user_id = ? AND item_id = ?",
+                (telegram_id, item_id),
+            ).fetchone()
+        if row is None:
+            return 0
+        return int(row["quantity"])
 
     def set_active_title(self, telegram_id: int, item_id: int | None) -> None:
         self._update_profile(telegram_id, title_id=item_id)
@@ -324,6 +396,38 @@ class CasinoDatabase:
         if row is None:
             return {"title_id": None, "balance_icon_id": None}
         return {"title_id": row["title_id"], "balance_icon_id": row["balance_icon_id"]}
+
+    def set_effect(
+        self,
+        telegram_id: int,
+        effect_type: str,
+        *,
+        item_id: int | None,
+        expires_at: int,
+        value: float | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "REPLACE INTO user_effects (user_id, effect_type, item_id, expires_at, value) VALUES (?, ?, ?, ?, ?)",
+                (telegram_id, effect_type, item_id, expires_at, value),
+            )
+
+    def clear_effect(self, telegram_id: int, effect_type: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_effects WHERE user_id = ? AND effect_type = ?",
+                (telegram_id, effect_type),
+            )
+
+    def get_effect(self, telegram_id: int, effect_type: str) -> dict[str, float | int | None] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT item_id, expires_at, value FROM user_effects WHERE user_id = ? AND effect_type = ?",
+                (telegram_id, effect_type),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"item_id": row["item_id"], "expires_at": row["expires_at"], "value": row["value"]}
 
     def _update_profile(self, telegram_id: int, *, title_id=_NotProvided, balance_icon_id=_NotProvided) -> None:
         with self._connect() as conn:

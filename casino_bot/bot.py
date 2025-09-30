@@ -24,6 +24,9 @@ from .slots import SlotMachine
 
 logger = logging.getLogger(__name__)
 
+WIN_BOOST_EFFECT = "win_boost"
+CREDIT_LINE_EFFECT = "credit_line"
+
 
 async def with_db(op, *args, **kwargs):
     return await asyncio.to_thread(op, *args, **kwargs)
@@ -62,6 +65,16 @@ class CasinoBot:
         self._shop_items = {item["id"]: item for item in settings.shop_items}
         self._title_items = {item_id: item for item_id, item in self._shop_items.items() if item.get("type") == "title"}
         self._icon_items = {item_id: item for item_id, item in self._shop_items.items() if item.get("type") == "balance_icon"}
+        self._credit_item_id = next(
+            (item_id for item_id, item in self._shop_items.items() if item.get("type") == "credit_line"),
+            None,
+        )
+        credit_item = self._shop_items.get(self._credit_item_id) if self._credit_item_id else None
+        self._credit_limit = int(credit_item.get("credit_limit", 0)) if credit_item else 0
+        self._win_boost_item_id = next(
+            (item_id for item_id, item in self._shop_items.items() if item.get("type") == "win_boost"),
+            None,
+        )
 
     def register(self, application: Application) -> None:
         application.add_handler(CommandHandler("start_casino", self.start_casino))
@@ -237,14 +250,28 @@ class CasinoBot:
 
     async def shop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
+        tg_user = update.effective_user
         if message is None:
             return
         if not self._shop_items:
             await self._safe_reply(message, "Магазин пока пуст.")
             return
+        owned_map: dict[int, int] = {}
+        active_title_id: int | None = None
+        active_icon_id: int | None = None
+        credit_state = None
+        if tg_user is not None:
+            owned_pairs = await with_db(self.db.get_inventory, tg_user.id)
+            owned_map = {item_id: qty for item_id, qty in owned_pairs}
+            profile = await with_db(self.db.get_profile, tg_user.id)
+            active_title_id = profile.get("title_id") if profile else None
+            active_icon_id = profile.get("balance_icon_id") if profile else None
+            credit_state = await self._get_credit_line_state(tg_user.id)
         categories = (
             ("title", "🎖 Титулы"),
             ("balance_icon", "💠 Иконки баланса"),
+            ("credit_line", "🏦 Кредитные услуги"),
+            ("win_boost", "🔮 Временные бусты"),
         )
         lines = ["🛍 Магазин статуса и привилегий:", ""]
         for key, label in categories:
@@ -256,7 +283,41 @@ class CasinoBot:
                 suffix = ""
                 if key == "balance_icon" and item.get("value"):
                     suffix = f" ({item['value']})"
-                lines.append(f"[{item['id']}] {item['name']}{suffix} — {item['price']} фишек")
+                if key == "credit_line" and item.get("credit_limit"):
+                    suffix = f" (лимит {int(item['credit_limit'])} фишек)"
+                if key == "win_boost":
+                    duration = int(item.get("duration_seconds", 0))
+                    minutes = duration // 60 if duration else 0
+                    multiplier = item.get("multiplier")
+                    parts: list[str] = []
+                    if minutes:
+                        parts.append(f"{minutes} мин")
+                    if multiplier:
+                        parts.append(f"x{multiplier:.2f}".rstrip("0").rstrip("."))
+                    if parts:
+                        suffix = f" ({', '.join(parts)})"
+                price = int(item.get("price", 0))
+                status_parts: list[str] = []
+                if tg_user is not None:
+                    item_id = item["id"]
+                    owned_qty = owned_map.get(item_id, 0)
+                    item_type = item.get("type")
+                    if item_type in {"title", "balance_icon"} and owned_qty:
+                        is_active = (
+                            item_type == "title" and item_id == active_title_id
+                        ) or (
+                            item_type == "balance_icon" and item_id == active_icon_id
+                        )
+                        status_parts.append("активно" if is_active else "куплено")
+                    elif owned_qty:
+                        status_parts.append(f"есть {owned_qty} шт.")
+                    if item_type == "credit_line" and credit_state:
+                        limit = int(credit_state.get("limit", self._credit_limit))
+                        status_parts.append(f"активировано (лимит {limit} фишек)")
+                line = f"[{item['id']}] {item['name']}{suffix} — {price} фишек"
+                if status_parts:
+                    line += " — " + ", ".join(status_parts)
+                lines.append(line)
             lines.append("")
         await self._safe_reply(message, "\n".join(line for line in lines if line), reply=False)
 
@@ -274,11 +335,17 @@ class CasinoBot:
         active_icon = profile.get("balance_icon_id")
         title_lines: list[str] = []
         icon_lines: list[str] = []
-        for item_id in owned:
+        credit_lines: list[str] = []
+        boost_lines: list[str] = []
+        active_boost = await self._get_active_win_boost(tg_user.id)
+        credit_state = await self._get_credit_line_state(tg_user.id)
+        for item_id, quantity in owned:
             item = self._shop_items.get(item_id)
             if not item:
                 continue
             entry = f"[{item_id}] {item['name']}"
+            if quantity > 1:
+                entry += f" ×{quantity}"
             if item.get("type") == "title":
                 if item_id == active_title:
                     entry += " (активно)"
@@ -289,6 +356,22 @@ class CasinoBot:
                 if item_id == active_icon:
                     entry += " (активно)"
                 icon_lines.append(entry)
+            elif item.get("type") == "credit_line":
+                limit = item.get("credit_limit")
+                if limit:
+                    entry += f" (лимит {int(limit)} фишек)"
+                if credit_state:
+                    entry += " (активно)"
+                credit_lines.append(entry)
+            elif item.get("type") == "win_boost":
+                if active_boost and active_boost.get("item_id") == item_id:
+                    remaining = active_boost.get("expires_at", 0) - int(time.time())
+                    if remaining > 0:
+                        entry += f" (активно ещё {format_timespan(remaining)})"
+                boost_lines.append(entry)
+        if credit_state and not credit_lines:
+            limit = int(credit_state.get("limit", self._credit_limit))
+            credit_lines.append(f"Активная кредитная линия (лимит {limit} фишек)")
         lines = ["🎒 Ваши предметы:", ""]
         if title_lines:
             lines.append("🎖 Титулы:")
@@ -298,7 +381,17 @@ class CasinoBot:
             lines.append("💠 Иконки баланса:")
             lines.extend(icon_lines)
             lines.append("")
+        if credit_lines:
+            lines.append("🏦 Кредитные услуги:")
+            lines.extend(credit_lines)
+            lines.append("")
+        if boost_lines:
+            lines.append("🔮 Временные бусты:")
+            lines.extend(boost_lines)
+            lines.append("")
         lines.append("Используйте /use <ID> для активации или /use reset_title /use reset_icon для сброса.")
+        if boost_lines:
+            lines.append("Активация амулета расходует один предмет и действует ограниченное время.")
         await self._safe_reply(message, "\n".join(line for line in lines if line), reply=False)
 
     async def buy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -322,7 +415,8 @@ class CasinoBot:
         if not user:
             await self._safe_reply(message, "Сначала зарегистрируйтесь командой /start_casino.")
             return
-        if await with_db(self.db.has_item, tg_user.id, item_id):
+        stackable = bool(item.get("stackable"))
+        if not stackable and await with_db(self.db.has_item, tg_user.id, item_id):
             await self._safe_reply(message, "Этот предмет уже в вашем инвентаре.")
             return
         price = int(item.get("price", 0))
@@ -331,12 +425,20 @@ class CasinoBot:
         except ValueError:
             await self._safe_reply(message, "Недостаточно фишек для покупки.")
             return
-        await with_db(self.db.add_item_to_inventory, tg_user.id, item_id)
+        await with_db(
+            self.db.add_item_to_inventory,
+            tg_user.id,
+            item_id,
+            stackable=stackable,
+        )
+        quantity = await with_db(self.db.get_item_quantity, tg_user.id, item_id)
         _, icon = await self._get_display_attributes(tg_user.id)
         lines = [
             f"Покупка оформлена! Вы приобрели «{item['name']}» за {price} фишек.",
-            self._format_balance_line(new_balance, icon),
         ]
+        if stackable and quantity:
+            lines.append(f"Всего в наличии: {quantity} шт.")
+        lines.append(self._format_balance_line(new_balance, icon))
         await self._safe_reply(message, "\n".join(lines), reply=False)
 
     async def use_item(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -381,6 +483,67 @@ class CasinoBot:
                 message,
                 f"Иконка баланса установлена на {item.get('value', '')}.",
             )
+        elif item_type == "credit_line":
+            current_credit = await self._get_credit_line_state(tg_user.id)
+            if current_credit:
+                limit = int(current_credit.get("limit", self._credit_limit))
+                await self._safe_reply(
+                    message,
+                    (
+                        "Кредитная линия уже активирована. "
+                        f"Текущий лимит: {limit} фишек."
+                    ),
+                )
+                return
+            consumed = await with_db(self.db.consume_item, tg_user.id, item_id)
+            if not consumed:
+                await self._safe_reply(message, "В вашем инвентаре нет доступных кредитных линий.")
+                return
+            limit = int(item.get("credit_limit", self._credit_limit))
+            await with_db(
+                self.db.set_effect,
+                tg_user.id,
+                CREDIT_LINE_EFFECT,
+                item_id=item_id,
+                expires_at=0,
+                value=float(limit),
+            )
+            await self._safe_reply(
+                message,
+                (
+                    "Кредитная линия активирована. "
+                    f"Вы можете один раз уйти в минус до {limit} фишек. Пока баланс отрицательный, новые ставки невозможны."
+                ),
+            )
+        elif item_type == "win_boost":
+            duration = max(0, int(item.get("duration_seconds", 0)))
+            multiplier = float(item.get("multiplier", 1.0))
+            if multiplier <= 1.0 or duration == 0:
+                await self._safe_reply(message, "Этот предмет сейчас не может быть активирован.")
+                return
+            consumed = await with_db(self.db.consume_item, tg_user.id, item_id)
+            if not consumed:
+                await self._safe_reply(message, "В вашем инвентаре нет доступных амулетов.")
+                return
+            expires_at = int(time.time()) + duration
+            await with_db(
+                self.db.set_effect,
+                tg_user.id,
+                WIN_BOOST_EFFECT,
+                item_id=item_id,
+                expires_at=expires_at,
+                value=multiplier,
+            )
+            bonus_pct = int(round((multiplier - 1.0) * 100))
+            minutes = duration // 60
+            await self._safe_reply(
+                message,
+                (
+                    "Амулет удачи активирован! "
+                    f"В течение {minutes} мин выигрыши увеличены на {bonus_pct}%"
+                    "."
+                ),
+            )
         else:
             await self._safe_reply(message, "Этот предмет нельзя использовать.")
 
@@ -413,10 +576,26 @@ class CasinoBot:
             if not user:
                 await self._safe_reply(message, "Сначала зарегистрируйтесь командой /start_casino.")
                 return
-            if user.balance <= 0:
-                await self._safe_reply(message, "На вашем счету нет фишек. Пополните баланс командой /daily или переводом.")
-                return
             await self._sync_username(tg_user, user)
+
+            credit_state = await self._get_credit_line_state(tg_user.id)
+            credit_limit = int(credit_state.get("limit", self._credit_limit)) if credit_state else 0
+
+            if user.balance <= 0:
+                if credit_state and user.balance + credit_limit > 0:
+                    pass
+                elif credit_state and user.balance < 0:
+                    await self._safe_reply(
+                        message,
+                        "Баланс отрицательный. Погасите долг, чтобы снова делать ставки.",
+                    )
+                    return
+                else:
+                    await self._safe_reply(
+                        message,
+                        "На вашем счету нет фишек. Пополните баланс командой /daily или переводом.",
+                    )
+                    return
 
             bet = self._resolve_bet(user.balance, bet_arg)
             if bet is None:
@@ -424,10 +603,35 @@ class CasinoBot:
                 return
 
             try:
-                balance_after_bet = await with_db(self.db.adjust_balance, tg_user.id, -bet)
+                balance_after_bet = await with_db(
+                    self.db.adjust_balance,
+                    tg_user.id,
+                    -bet,
+                    allow_overdraft=bool(credit_state),
+                    overdraft_limit=credit_limit,
+                )
             except ValueError:
+                if credit_state:
+                    max_available = user.balance + credit_limit
+                    if max_available > user.balance:
+                        await self._safe_reply(
+                            message,
+                            (
+                                "Недостаточно доступного кредита для этой ставки. "
+                                f"Максимум сейчас: {max_available} фишек."
+                            ),
+                        )
+                        return
                 await self._safe_reply(message, "Недостаточно фишек для этой ставки.")
                 return
+
+            credit_line_note: str | None = None
+            credit_used = bool(credit_state) and balance_after_bet < 0
+            if credit_used:
+                await with_db(self.db.clear_effect, tg_user.id, CREDIT_LINE_EFFECT)
+                credit_line_note = (
+                    "Кредитная линия израсходована. Погасите долг, чтобы оформить новую."
+                )
 
             jackpot_balance = 0
             contribution = 0
@@ -448,10 +652,23 @@ class CasinoBot:
                 await asyncio.sleep(frame_delay * 3)
 
             outcome = machine.spin(bet, self._rng, jackpot_balance=jackpot_balance)
+            new_balance = balance_after_bet
+            bonus_line: str | None = None
             if outcome.winnings:
-                new_balance = await with_db(self.db.adjust_balance, tg_user.id, outcome.winnings)
-            else:
-                new_balance = balance_after_bet
+                new_balance = await with_db(
+                    self.db.adjust_balance,
+                    tg_user.id,
+                    outcome.winnings,
+                )
+                bonus_amount, bonus_line = await self._apply_win_boost(
+                    tg_user.id, outcome.winnings
+                )
+                if bonus_amount:
+                    new_balance = await with_db(
+                        self.db.adjust_balance,
+                        tg_user.id,
+                        bonus_amount,
+                    )
 
             current_jackpot = None
             if machine.supports_jackpot():
@@ -460,7 +677,12 @@ class CasinoBot:
                 current_jackpot = await with_db(self.db.get_jackpot, machine.key)
 
             _, icon = await self._get_display_attributes(tg_user.id)
-            final_lines = [outcome.message, self._format_balance_line(new_balance, icon)]
+            final_lines = [outcome.message]
+            if bonus_line:
+                final_lines.append(bonus_line)
+            if credit_line_note:
+                final_lines.append(credit_line_note)
+            final_lines.append(self._format_balance_line(new_balance, icon))
             if machine.supports_jackpot() and current_jackpot is not None:
                 final_lines.append(f"Текущий джекпот: {current_jackpot} фишек")
             final_text = "\n".join(final_lines)
@@ -594,6 +816,66 @@ class CasinoBot:
                 icon = item.get("value") or ""
         return title, icon
 
+    async def _get_credit_line_state(self, telegram_id: int) -> dict[str, int] | None:
+        effect = await with_db(self.db.get_effect, telegram_id, CREDIT_LINE_EFFECT)
+        if not effect:
+            return None
+        limit_raw = effect.get("value")
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            limit = self._credit_limit
+        limit = max(0, limit)
+        return {"limit": limit}
+
+    async def _get_active_win_boost(self, telegram_id: int) -> dict[str, float | int] | None:
+        if not self._win_boost_item_id:
+            return None
+        effect = await with_db(self.db.get_effect, telegram_id, WIN_BOOST_EFFECT)
+        if not effect:
+            return None
+        expires_at_raw = effect.get("expires_at")
+        expires_at = int(expires_at_raw) if expires_at_raw else 0
+        if expires_at <= int(time.time()):
+            await with_db(self.db.clear_effect, telegram_id, WIN_BOOST_EFFECT)
+            return None
+        multiplier_raw = effect.get("value")
+        try:
+            multiplier = float(multiplier_raw)
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        multiplier = max(1.0, multiplier)
+        item_id_raw = effect.get("item_id")
+        try:
+            item_id_val = int(item_id_raw)
+        except (TypeError, ValueError):
+            item_id_val = self._win_boost_item_id
+        return {
+            "item_id": item_id_val,
+            "expires_at": expires_at,
+            "multiplier": multiplier,
+        }
+
+    async def _apply_win_boost(self, telegram_id: int, base_winnings: int) -> tuple[int, str | None]:
+        if base_winnings <= 0:
+            return 0, None
+        boost = await self._get_active_win_boost(telegram_id)
+        if not boost:
+            return 0, None
+        multiplier = float(boost.get("multiplier", 1.0))
+        if multiplier <= 1.0:
+            return 0, None
+        bonus = int(base_winnings * (multiplier - 1.0))
+        if bonus <= 0:
+            bonus = 1
+        remaining = boost.get("expires_at", 0) - int(time.time())
+        bonus_pct = int(round((multiplier - 1.0) * 100))
+        total = base_winnings + bonus
+        message = f"Бонус амулета: +{bonus} фишек ({bonus_pct}%), итого {total}."
+        if remaining > 0:
+            message += f" Осталось {format_timespan(int(remaining))}."
+        return bonus, message
+
     def _format_balance_line(self, balance: int, icon: str | None) -> str:
         icon_text = f"{icon} " if icon else ""
         return f"Ваш баланс: {icon_text}{balance} фишек."
@@ -643,15 +925,23 @@ class CasinoBot:
             await asyncio.sleep(frame_delay)
 
             outcome = machine.spin(0, rng, jackpot_balance=0)
+            bonus_line_text: str | None = None
             if outcome.winnings:
                 await with_db(self.db.adjust_balance, telegram_id, outcome.winnings)
                 total_winnings += outcome.winnings
+                bonus_amount, bonus_line = await self._apply_win_boost(telegram_id, outcome.winnings)
+                if bonus_amount:
+                    await with_db(self.db.adjust_balance, telegram_id, bonus_amount)
+                    total_winnings += bonus_amount
+                    bonus_line_text = bonus_line
             if "\n" in outcome.message:
                 _, second_line = outcome.message.split("\n", 1)
                 result_line = f"→ {second_line}"
             else:
                 result_line = f"→ {outcome.message}"
             spin_texts.append(result_line)
+            if bonus_line_text:
+                spin_texts.append(f"→ {bonus_line_text}")
             if base_message:
                 await self._safe_edit(base_message, "\n".join(spin_texts))
             await asyncio.sleep(0.2)
