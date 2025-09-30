@@ -269,10 +269,7 @@ class CasinoBot:
             contribution = 0
             if machine.supports_jackpot():
                 contribution = machine.jackpot_contribution(bet)
-                if contribution:
-                    jackpot_balance = await with_db(self.db.add_to_jackpot, machine.key, contribution)
-                else:
-                    jackpot_balance = await with_db(self.db.get_jackpot, machine.key)
+                jackpot_balance = await with_db(self.db.add_to_jackpot, machine.key, contribution)
 
             spin_message = await self._safe_reply(message, f"🎰 {machine.title}: вращаем барабаны...", reply=False)
             frame_delay = 0.9
@@ -299,14 +296,8 @@ class CasinoBot:
                 current_jackpot = await with_db(self.db.get_jackpot, machine.key)
 
             final_lines = [outcome.message, f"Ваш баланс: {new_balance} фишек."]
-            if machine.supports_jackpot():
-                info_parts = []
-                if contribution:
-                    info_parts.append(f"в фонд добавлено {contribution} фишек")
-                if current_jackpot is not None:
-                    info_parts.append(f"текущий джекпот: {current_jackpot} фишек")
-                if info_parts:
-                    final_lines.append("; ".join(info_parts))
+            if machine.supports_jackpot() and current_jackpot is not None:
+                final_lines.append(f"Текущий джекпот: {current_jackpot} фишек")
             final_text = "\n".join(final_lines)
             if spin_message and await self._safe_edit(spin_message, final_text):
                 edited_message = spin_message
