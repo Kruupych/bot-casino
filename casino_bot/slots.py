@@ -245,7 +245,7 @@ class PirateMachine(SlotMachine):
     _scatter = "🗺️"
 
     def __init__(self) -> None:
-        super().__init__(("🏴‍☠️", "🦜", "💣", "💎", "⚓", "🧭", self._scatter))
+        super().__init__(("🏴‍☠️", "🦜", "💣", "💎", "⚓", self._scatter))
 
     def evaluate(
         self, symbols: tuple[str, str, str], bet: int, jackpot_balance: int
@@ -255,7 +255,7 @@ class PirateMachine(SlotMachine):
             return (0, "Вы нашли карту сокровищ! Запускаются 10 бесплатных вращений!", 0, {"free_spins": 10})
 
         if symbols[0] == symbols[1] == symbols[2]:
-            multiplier = {"🏴‍☠️": 30, "🦜": 20, "💣": 15, "💎": 10, "⚓": 6, "🧭": 6}.get(symbols[0], 8)
+            multiplier = {"🏴‍☠️": 30, "🦜": 20, "💣": 15, "💎": 10, "⚓": 6}.get(symbols[0], 8)
             winnings = bet * multiplier
             return winnings, f"Три {symbols[0]}! Вы выиграли {winnings} фишек.", 0, {}
 
