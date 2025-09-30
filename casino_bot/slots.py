@@ -186,14 +186,13 @@ class WildJackpotMachine(SlotMachine):
                 multiplier = self._double_payouts.get(best_symbol, 0)
 
             if multiplier:
-                multiplier *= 2
                 winnings = bet * multiplier
                 if matches >= 3:
                     return winnings, (
-                        f"{self._wild} поддержал комбинацию! Три {best_symbol} приносят {winnings} фишек с множителем x2."
+                        f"{self._wild} поддержал комбинацию! Три {best_symbol} приносят {winnings} фишек."
                     ), 0, {}
                 return winnings, (
-                    f"{self._wild} дополнил ваш выигрыш! Пара {best_symbol} приносит {winnings} фишек с множителем x2."
+                    f"{self._wild} дополнил ваш выигрыш! Пара {best_symbol} приносит {winnings} фишек."
                 ), 0, {}
 
         if len(set(symbols)) == 1 and symbols[0] != self._wild:
