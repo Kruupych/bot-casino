@@ -308,3 +308,7 @@ def main() -> None:
 
 
 __all__ = ["build_application", "main", "CasinoBot"]
+
+
+if __name__ == "__main__":
+    main()
