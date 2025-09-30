@@ -31,10 +31,16 @@ pip install -r requirements.txt
 
 ## Запуск
 ```bash
-python -m casino_bot.bot
+python main.py
 ```
 
 После запуска бот начнёт опрашивать Telegram и реагировать на команды согласно ТЗ.
+
+Альтернативно можно запустить модуль напрямую:
+
+```bash
+python -m casino_bot.bot
+```
 
 ### Использование файла `.env`
 

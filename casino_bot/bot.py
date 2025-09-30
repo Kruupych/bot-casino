@@ -288,7 +288,11 @@ class CasinoBot:
         return f"{header}\nВы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
 
 
-def build_application(token: str, db_path: str | None = None, settings: Settings | None = None) -> Application:
+def build_application(
+    token: str,
+    db_path: str | None = None,
+    settings: Settings | None = None,
+) -> Application:
     db_location = db_path or os.environ.get("CASINO_DB_PATH", "casino.sqlite3")
     db = CasinoDatabase(db_location)
     config = settings or Settings.from_env()
@@ -308,7 +312,3 @@ def main() -> None:
 
 
 __all__ = ["build_application", "main", "CasinoBot"]
-
-
-if __name__ == "__main__":
-    main()
