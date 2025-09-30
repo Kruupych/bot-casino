@@ -141,12 +141,20 @@ class Settings:
                 "credit_limit": 500,
             },
             {
-                "id": 21,
+                "id": 25,
                 "type": "win_boost",
                 "name": "Амулет удачи (15 минут)",
                 "price": 7_500,
                 "duration_seconds": 15 * 60,
                 "multiplier": 1.2,
+                "stackable": True,
+            },
+            {
+                "id": 30,
+                "type": "analytics_subscription",
+                "name": "Подписка «Инсайдер» (7 дней)",
+                "price": 3_000,
+                "duration_seconds": 7 * 24 * 60 * 60,
                 "stackable": True,
             },
         )

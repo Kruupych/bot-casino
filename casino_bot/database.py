@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -91,6 +92,25 @@ class CasinoDatabase:
                     PRIMARY KEY (user_id, effect_type)
                 )
                 """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS slot_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    machine_key TEXT NOT NULL,
+                    bet INTEGER NOT NULL,
+                    winnings INTEGER NOT NULL,
+                    is_free_spin INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_slot_history_timestamp ON slot_history(timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_slot_history_user ON slot_history(user_id, timestamp)"
             )
             try:
                 has_quantity = any(
@@ -428,6 +448,118 @@ class CasinoDatabase:
         if row is None:
             return None
         return {"item_id": row["item_id"], "expires_at": row["expires_at"], "value": row["value"]}
+
+    def record_spin(
+        self,
+        telegram_id: int,
+        machine_key: str,
+        bet: int,
+        winnings: int,
+        is_free: bool,
+        *,
+        timestamp: int | None = None,
+    ) -> None:
+        ts = int(timestamp if timestamp is not None else time.time())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO slot_history (timestamp, user_id, machine_key, bet, winnings, is_free_spin)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (ts, telegram_id, machine_key, bet, winnings, 1 if is_free else 0),
+            )
+
+    def machine_performance(self, since_timestamp: int) -> list[dict[str, int]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT machine_key,
+                       COALESCE(SUM(bet), 0) AS total_bet,
+                       COALESCE(SUM(winnings), 0) AS total_win,
+                       COUNT(*) AS spins
+                FROM slot_history
+                WHERE timestamp >= ?
+                GROUP BY machine_key
+                """,
+                (since_timestamp,),
+            ).fetchall()
+        return [
+            {
+                "machine_key": row["machine_key"],
+                "total_bet": int(row["total_bet"] or 0),
+                "total_win": int(row["total_win"] or 0),
+                "spins": int(row["spins"] or 0),
+            }
+            for row in rows
+        ]
+
+    def best_win(self, since_timestamp: int) -> dict[str, int] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id, machine_key, bet, winnings, timestamp
+                FROM slot_history
+                WHERE timestamp >= ? AND winnings > 0
+                ORDER BY winnings DESC
+                LIMIT 1
+                """,
+                (since_timestamp,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "user_id": row["user_id"],
+            "machine_key": row["machine_key"],
+            "bet": int(row["bet"] or 0),
+            "winnings": int(row["winnings"] or 0),
+            "timestamp": int(row["timestamp"] or 0),
+        }
+
+    def user_totals(self, telegram_id: int, since_timestamp: int | None = None) -> dict[str, int]:
+        if since_timestamp is not None:
+            query = (
+                "SELECT COALESCE(SUM(bet),0) AS total_bet, COALESCE(SUM(winnings),0) AS total_win, COUNT(*) AS spins"
+                " FROM slot_history WHERE user_id = ? AND timestamp >= ?"
+            )
+            params = (telegram_id, since_timestamp)
+        else:
+            query = (
+                "SELECT COALESCE(SUM(bet),0) AS total_bet, COALESCE(SUM(winnings),0) AS total_win, COUNT(*) AS spins"
+                " FROM slot_history WHERE user_id = ?"
+            )
+            params = (telegram_id,)
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        return {
+            "total_bet": int(row["total_bet"] or 0),
+            "total_win": int(row["total_win"] or 0),
+            "spins": int(row["spins"] or 0),
+        }
+
+    def user_favourite_machine(
+        self,
+        telegram_id: int,
+        since_timestamp: int | None = None,
+    ) -> tuple[str, int] | None:
+        if since_timestamp is not None:
+            query = (
+                "SELECT machine_key, COUNT(*) AS spins FROM slot_history"
+                " WHERE user_id = ? AND timestamp >= ? GROUP BY machine_key"
+                " ORDER BY spins DESC LIMIT 1"
+            )
+            params = (telegram_id, since_timestamp)
+        else:
+            query = (
+                "SELECT machine_key, COUNT(*) AS spins FROM slot_history"
+                " WHERE user_id = ? GROUP BY machine_key"
+                " ORDER BY spins DESC LIMIT 1"
+            )
+            params = (telegram_id,)
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        if row is None:
+            return None
+        return row["machine_key"], int(row["spins"] or 0)
 
     def _update_profile(self, telegram_id: int, *, title_id=_NotProvided, balance_icon_id=_NotProvided) -> None:
         with self._connect() as conn:

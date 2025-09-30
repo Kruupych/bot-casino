@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 WIN_BOOST_EFFECT = "win_boost"
 CREDIT_LINE_EFFECT = "credit_line"
+ANALYTICS_EFFECT = "analytics_subscription"
 
 
 async def with_db(op, *args, **kwargs):
@@ -75,6 +76,14 @@ class CasinoBot:
             (item_id for item_id, item in self._shop_items.items() if item.get("type") == "win_boost"),
             None,
         )
+        self._analytics_item_id = next(
+            (
+                item_id
+                for item_id, item in self._shop_items.items()
+                if item.get("type") == "analytics_subscription"
+            ),
+            None,
+        )
 
     def register(self, application: Application) -> None:
         application.add_handler(CommandHandler("start_casino", self.start_casino))
@@ -88,6 +97,7 @@ class CasinoBot:
         application.add_handler(CommandHandler("inventory", self.inventory))
         application.add_handler(CommandHandler("buy", self.buy))
         application.add_handler(CommandHandler("use", self.use_item))
+        application.add_handler(CommandHandler("stats", self.stats))
         application.add_handler(ChatMemberHandler(self.welcome_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
     async def _sync_username(self, telegram_user, record: User | None) -> None:
@@ -260,6 +270,8 @@ class CasinoBot:
         active_title_id: int | None = None
         active_icon_id: int | None = None
         credit_state = None
+        analytics_state = None
+        now = int(time.time())
         if tg_user is not None:
             owned_pairs = await with_db(self.db.get_inventory, tg_user.id)
             owned_map = {item_id: qty for item_id, qty in owned_pairs}
@@ -267,11 +279,13 @@ class CasinoBot:
             active_title_id = profile.get("title_id") if profile else None
             active_icon_id = profile.get("balance_icon_id") if profile else None
             credit_state = await self._get_credit_line_state(tg_user.id)
+            analytics_state = await self._get_analytics_access(tg_user.id)
         categories = (
             ("title", "🎖 Титулы"),
             ("balance_icon", "💠 Иконки баланса"),
             ("credit_line", "🏦 Кредитные услуги"),
             ("win_boost", "🔮 Временные бусты"),
+            ("analytics_subscription", "📊 Аналитика"),
         )
         lines = ["🛍 Магазин статуса и привилегий:", ""]
         for key, label in categories:
@@ -314,6 +328,16 @@ class CasinoBot:
                     if item_type == "credit_line" and credit_state:
                         limit = int(credit_state.get("limit", self._credit_limit))
                         status_parts.append(f"активировано (лимит {limit} фишек)")
+                    if item_type == "analytics_subscription" and analytics_state:
+                        remaining = analytics_state.get("expires_at", 0) - now
+                        if remaining > 0:
+                            status_parts.append(
+                                f"активна ещё {format_timespan(remaining)}"
+                            )
+                    elif item_type == "analytics_subscription" and owned_qty:
+                        status_parts.append(f"есть {owned_qty} шт.")
+                    elif owned_qty and item.get("stackable"):
+                        status_parts.append(f"есть {owned_qty} шт.")
                 line = f"[{item['id']}] {item['name']}{suffix} — {price} фишек"
                 if status_parts:
                     line += " — " + ", ".join(status_parts)
@@ -337,8 +361,10 @@ class CasinoBot:
         icon_lines: list[str] = []
         credit_lines: list[str] = []
         boost_lines: list[str] = []
+        analytics_lines: list[str] = []
         active_boost = await self._get_active_win_boost(tg_user.id)
         credit_state = await self._get_credit_line_state(tg_user.id)
+        analytics_state = await self._get_analytics_access(tg_user.id)
         for item_id, quantity in owned:
             item = self._shop_items.get(item_id)
             if not item:
@@ -369,9 +395,21 @@ class CasinoBot:
                     if remaining > 0:
                         entry += f" (активно ещё {format_timespan(remaining)})"
                 boost_lines.append(entry)
+            elif item.get("type") == "analytics_subscription":
+                if analytics_state:
+                    remaining = analytics_state.get("expires_at", 0) - int(time.time())
+                    if remaining > 0:
+                        entry += f" (активна ещё {format_timespan(remaining)})"
+                analytics_lines.append(entry)
         if credit_state and not credit_lines:
             limit = int(credit_state.get("limit", self._credit_limit))
             credit_lines.append(f"Активная кредитная линия (лимит {limit} фишек)")
+        if analytics_state and not analytics_lines:
+            remaining = analytics_state.get("expires_at", 0) - int(time.time())
+            if remaining > 0:
+                analytics_lines.append(
+                    f"Подписка «Инсайдер» активна ещё {format_timespan(remaining)}"
+                )
         lines = ["🎒 Ваши предметы:", ""]
         if title_lines:
             lines.append("🎖 Титулы:")
@@ -389,9 +427,15 @@ class CasinoBot:
             lines.append("🔮 Временные бусты:")
             lines.extend(boost_lines)
             lines.append("")
+        if analytics_lines:
+            lines.append("📊 Аналитика:")
+            lines.extend(analytics_lines)
+            lines.append("")
         lines.append("Используйте /use <ID> для активации или /use reset_title /use reset_icon для сброса.")
         if boost_lines:
             lines.append("Активация амулета расходует один предмет и действует ограниченное время.")
+        if analytics_lines:
+            lines.append("Подписка «Инсайдер» даёт доступ к /stats на время действия.")
         await self._safe_reply(message, "\n".join(line for line in lines if line), reply=False)
 
     async def buy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -544,6 +588,37 @@ class CasinoBot:
                     "."
                 ),
             )
+        elif item_type == "analytics_subscription":
+            duration = max(0, int(item.get("duration_seconds", 0)))
+            if duration == 0:
+                await self._safe_reply(message, "Подписку пока нельзя активировать.")
+                return
+            consumed = await with_db(self.db.consume_item, tg_user.id, item_id)
+            if not consumed:
+                await self._safe_reply(message, "В вашем инвентаре нет активируемых подписок.")
+                return
+            current = await self._get_analytics_access(tg_user.id)
+            now = int(time.time())
+            base_expiry = current.get("expires_at", now) if current else now
+            if base_expiry < now:
+                base_expiry = now
+            new_expiry = base_expiry + duration
+            await with_db(
+                self.db.set_effect,
+                tg_user.id,
+                ANALYTICS_EFFECT,
+                item_id=item_id,
+                expires_at=new_expiry,
+                value=None,
+            )
+            remaining = new_expiry - now
+            await self._safe_reply(
+                message,
+                (
+                    "Подписка «Инсайдер» активирована! "
+                    f"Доступ к /stats действует ещё {format_timespan(remaining)}."
+                ),
+            )
         else:
             await self._safe_reply(message, "Этот предмет нельзя использовать.")
 
@@ -602,6 +677,7 @@ class CasinoBot:
                 await self._safe_reply(message, "Ставка должна быть положительным числом.")
                 return
 
+            bonus_amount = 0
             try:
                 balance_after_bet = await with_db(
                     self.db.adjust_balance,
@@ -632,6 +708,7 @@ class CasinoBot:
                 credit_line_note = (
                     "Кредитная линия израсходована. Погасите долг, чтобы оформить новую."
                 )
+                credit_state = None
 
             jackpot_balance = 0
             contribution = 0
@@ -669,6 +746,17 @@ class CasinoBot:
                         tg_user.id,
                         bonus_amount,
                     )
+
+            total_winnings = outcome.winnings + bonus_amount
+
+            await with_db(
+                self.db.record_spin,
+                tg_user.id,
+                machine.key,
+                bet,
+                total_winnings,
+                False,
+            )
 
             current_jackpot = None
             if machine.supports_jackpot():
@@ -718,6 +806,80 @@ class CasinoBot:
             return
 
         text = "\n".join(["💰 Активные джекпоты в казино:", "", *jackpots])
+        await self._safe_reply(message, text, reply=False)
+
+    async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.message
+        tg_user = update.effective_user
+        if message is None or tg_user is None:
+            return
+
+        analytics = await self._get_analytics_access(tg_user.id)
+        if not analytics:
+            await self._safe_reply(
+                message,
+                "Эта команда доступна подписчикам «Инсайдер». Оформите подписку в /shop.",
+            )
+            return
+
+        now = int(time.time())
+        day_ago = now - 24 * 60 * 60
+        week_ago = now - 7 * 24 * 60 * 60
+
+        machine_stats = await with_db(self.db.machine_performance, day_ago)
+        for entry in machine_stats:
+            entry["net"] = entry["total_win"] - entry["total_bet"]
+
+        hot = [entry for entry in machine_stats if entry["net"] > 0]
+        cold = [entry for entry in machine_stats if entry["net"] < 0]
+        hot_sorted = sorted(hot, key=lambda e: (e["net"], e["total_win"]), reverse=True)[:3]
+        cold_sorted = sorted(cold, key=lambda e: (e["net"], e["total_win"]))[:3]
+
+        best_day = await with_db(self.db.best_win, day_ago)
+        best_week = await with_db(self.db.best_win, week_ago)
+
+        totals_all = await with_db(self.db.user_totals, tg_user.id)
+        totals_week = await with_db(self.db.user_totals, tg_user.id, week_ago)
+        favourite = await with_db(self.db.user_favourite_machine, tg_user.id)
+
+        lines = ["📊 Аналитика казино", ""]
+
+        if hot_sorted:
+            lines.append("🔥 Горячие автоматы (24 часа):")
+            lines.extend(self._format_machine_line(entry) for entry in hot_sorted)
+            lines.append("")
+        if cold_sorted:
+            lines.append("❄️ Холодные автоматы (24 часа):")
+            lines.extend(self._format_machine_line(entry) for entry in cold_sorted)
+            lines.append("")
+
+        lines.append("🏆 Крупные выигрыши:")
+        lines.append(
+            "• За сутки: " + await self._format_best_win(best_day, fallback="данных нет")
+        )
+        lines.append(
+            "• За неделю: " + await self._format_best_win(best_week, fallback="данных нет")
+        )
+        lines.append("")
+
+        favourite_text = "нет данных"
+        if favourite:
+            favourite_text = f"{self._machine_title(favourite[0])} (спинов: {favourite[1]})"
+
+        lines.append("🎯 Ваша статистика:")
+        lines.append(
+            "• За всё время: ставки "
+            f"{self._fmt_chips(totals_all['total_bet'])}, выигрыши {self._fmt_chips(totals_all['total_win'])},"
+            f" нетто {self._fmt_delta(totals_all['total_win'] - totals_all['total_bet'])}"
+        )
+        lines.append(
+            "• За неделю: ставки "
+            f"{self._fmt_chips(totals_week['total_bet'])}, выигрыши {self._fmt_chips(totals_week['total_win'])},"
+            f" нетто {self._fmt_delta(totals_week['total_win'] - totals_week['total_bet'])}"
+        )
+        lines.append(f"• Любимый автомат: {favourite_text}")
+
+        text = "\n".join(line for line in lines if line)
         await self._safe_reply(message, text, reply=False)
 
     async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -828,6 +990,17 @@ class CasinoBot:
         limit = max(0, limit)
         return {"limit": limit}
 
+    async def _get_analytics_access(self, telegram_id: int) -> dict[str, int] | None:
+        effect = await with_db(self.db.get_effect, telegram_id, ANALYTICS_EFFECT)
+        if not effect:
+            return None
+        expires_at_raw = effect.get("expires_at")
+        expires_at = int(expires_at_raw) if expires_at_raw else 0
+        if expires_at <= int(time.time()):
+            await with_db(self.db.clear_effect, telegram_id, ANALYTICS_EFFECT)
+            return None
+        return {"expires_at": expires_at, "item_id": effect.get("item_id")}
+
     async def _get_active_win_boost(self, telegram_id: int) -> dict[str, float | int] | None:
         if not self._win_boost_item_id:
             return None
@@ -880,6 +1053,50 @@ class CasinoBot:
         icon_text = f"{icon} " if icon else ""
         return f"Ваш баланс: {icon_text}{balance} фишек."
 
+    def _fmt_chips(self, amount: int) -> str:
+        return f"{amount:,}".replace(",", " ")
+
+    def _fmt_delta(self, amount: int) -> str:
+        sign = "+" if amount > 0 else ""
+        return f"{sign}{self._fmt_chips(amount)}"
+
+    def _machine_title(self, key: str) -> str:
+        machine = self._slot_machines.get(key)
+        return machine.title if machine else key
+
+    def _format_machine_line(self, entry: dict[str, int]) -> str:
+        title = self._machine_title(entry["machine_key"])
+        net = entry["net"]
+        net_text = self._fmt_delta(net)
+        bet_text = self._fmt_chips(entry["total_bet"])
+        win_text = self._fmt_chips(entry["total_win"])
+        spins = entry["spins"]
+        return (
+            f"• {title}: нетто {net_text} (ставки {bet_text}, выигрыши {win_text}, спинов {spins})"
+        )
+
+    async def _format_best_win(
+        self,
+        record: dict[str, int] | None,
+        *,
+        fallback: str,
+    ) -> str:
+        if not record:
+            return fallback
+        player = await with_db(self.db.get_user, record["user_id"])
+        name = format_username(player, fallback=f"Игрок {record['user_id']}")
+        machine_name = self._machine_title(record["machine_key"])
+        winnings = self._fmt_chips(record["winnings"])
+        bet = self._fmt_chips(record["bet"])
+        ago = self._format_relative_time(record["timestamp"])
+        return (
+            f"{name} — {winnings} фишек ({machine_name}, ставка {bet}, {ago})"
+        )
+
+    def _format_relative_time(self, timestamp: int) -> str:
+        delta = max(0, int(time.time()) - int(timestamp))
+        return f"{format_timespan(delta)} назад"
+
     async def _safe_reply(self, message, text: str, *, reply: bool = True):
         for attempt in range(3):
             try:
@@ -926,6 +1143,7 @@ class CasinoBot:
 
             outcome = machine.spin(0, rng, jackpot_balance=0)
             bonus_line_text: str | None = None
+            bonus_amount = 0
             if outcome.winnings:
                 await with_db(self.db.adjust_balance, telegram_id, outcome.winnings)
                 total_winnings += outcome.winnings
@@ -942,6 +1160,14 @@ class CasinoBot:
             spin_texts.append(result_line)
             if bonus_line_text:
                 spin_texts.append(f"→ {bonus_line_text}")
+            await with_db(
+                self.db.record_spin,
+                telegram_id,
+                machine.key,
+                0,
+                outcome.winnings + bonus_amount,
+                True,
+            )
             if base_message:
                 await self._safe_edit(base_message, "\n".join(spin_texts))
             await asyncio.sleep(0.2)
