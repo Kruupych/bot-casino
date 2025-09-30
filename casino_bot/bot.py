@@ -470,9 +470,11 @@ class CasinoBot:
             if outcome.winnings:
                 await with_db(self.db.adjust_balance, telegram_id, outcome.winnings)
                 total_winnings += outcome.winnings
-            result_line = (
-                f"→ {outcome.message.split('\n')[1]}" if "\n" in outcome.message else f"→ {outcome.message}"
-            )
+            if "\n" in outcome.message:
+                _, second_line = outcome.message.split("\n", 1)
+                result_line = f"→ {second_line}"
+            else:
+                result_line = f"→ {outcome.message}"
             spin_texts.append(result_line)
             if base_message:
                 await self._safe_edit(base_message, "\n".join(spin_texts))
