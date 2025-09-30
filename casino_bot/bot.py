@@ -249,12 +249,16 @@ class CasinoBot:
                 return
 
             spin_message = await self._safe_reply(message, "🎰 Крутим барабан...", reply=False)
-            await asyncio.sleep(0.6)
-
+            frame_delay = 0.9
             if spin_message:
-                temp_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
-                if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
-                    spin_message = None
+                for _ in range(3):
+                    await asyncio.sleep(frame_delay)
+                    temp_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
+                    if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
+                        spin_message = None
+                        break
+            else:
+                await asyncio.sleep(frame_delay * 3)
 
             final_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
 
