@@ -220,25 +220,27 @@ class CasinoBot:
         if message is None or tg_user is None:
             return
 
-        if not context.args:
-            await message.reply_text("Используйте: /slots <ставка>")
-            return
-
-        try:
-            bet = int(context.args[0])
-        except ValueError:
-            await message.reply_text("Ставка должна быть положительным числом.")
-            return
-
-        if bet <= 0:
-            await message.reply_text("Ставка должна быть положительным числом.")
-            return
-
         user = await with_db(self.db.get_user, tg_user.id)
         if not user:
             await message.reply_text("Сначала зарегистрируйтесь командой /start_casino.")
             return
         await self._sync_username(tg_user, user)
+
+        if context.args:
+            try:
+                bet = int(context.args[0])
+            except ValueError:
+                await message.reply_text("Ставка должна быть положительным числом.")
+                return
+        else:
+            bet = max(1, min(1000, max(1, int(user.balance * 0.05))))
+            if bet == 0:
+                await message.reply_text("Недостаточно фишек для автоматической ставки.")
+                return
+
+        if bet <= 0:
+            await message.reply_text("Ставка должна быть положительным числом.")
+            return
 
         try:
             balance_after_bet = await with_db(self.db.adjust_balance, tg_user.id, -bet)
