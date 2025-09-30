@@ -11,6 +11,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 
 from .config import Settings
 from .database import CasinoDatabase, User
+from .env import load_dotenv
 
 
 async def with_db(op, *args, **kwargs):
@@ -298,6 +299,7 @@ def build_application(token: str, db_path: str | None = None, settings: Settings
 
 
 def main() -> None:
+    load_dotenv()
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is required")
