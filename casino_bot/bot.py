@@ -7,7 +7,13 @@ import time
 from typing import Sequence
 
 from telegram import Update
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    ChatMemberHandler,
+    CommandHandler,
+    ContextTypes,
+)
 
 from .config import Settings
 from .database import CasinoDatabase, User
@@ -51,6 +57,7 @@ class CasinoBot:
         application.add_handler(CommandHandler("daily", self.daily))
         application.add_handler(CommandHandler("give", self.give))
         application.add_handler(CommandHandler("slots", self.slots))
+        application.add_handler(ChatMemberHandler(self.welcome_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
     async def _sync_username(self, telegram_user, record: User | None) -> None:
         if not telegram_user or not record or not telegram_user.username:
@@ -254,6 +261,28 @@ class CasinoBot:
 
         result_text = self._build_slots_result_text(final_symbols, winnings, new_balance)
         await message.reply_text(result_text)
+
+    async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_member = update.my_chat_member
+        if chat_member is None:
+            return
+        new_status = chat_member.new_chat_member
+        if not new_status or new_status.user.id != context.bot.id:
+            return
+        chat = chat_member.chat
+        if chat.type not in {"group", "supergroup"}:
+            return
+        commands = (
+            "Добро пожаловать в чат-казино! 🤖\n"
+            "Доступные команды:\n"
+            "• /start_casino — регистрация и стартовый бонус\n"
+            "• /balance — посмотреть баланс\n"
+            "• /daily — ежедневный бонус\n"
+            "• /slots <ставка> — сыграть в слоты\n"
+            "• /give <сумма> @username — перевести фишки\n"
+            "• /top — таблица лидеров"
+        )
+        await context.bot.send_message(chat.id, commands)
 
     def _payout_multiplier(self, symbols: tuple[str, str, str]) -> int:
         special = self.settings.special_payouts.get(symbols)
