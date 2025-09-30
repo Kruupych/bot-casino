@@ -250,8 +250,6 @@ class CasinoBot:
             await spin_message.edit_text(f"[ {' | '.join(temp_symbols)} ]")
             await asyncio.sleep(0.5)
 
-        await spin_message.edit_text(f"[ {' | '.join(final_symbols)} ]")
-
         multiplier = self._payout_multiplier(tuple(final_symbols))
         winnings = bet * multiplier
         if winnings:
@@ -260,17 +258,20 @@ class CasinoBot:
             new_balance = balance_after_bet
 
         result_text = self._build_slots_result_text(final_symbols, winnings, new_balance)
-        await message.reply_text(result_text)
+        await spin_message.edit_text(result_text)
 
     async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_member = update.my_chat_member
         if chat_member is None:
             return
         new_status = chat_member.new_chat_member
+        old_status = chat_member.old_chat_member
         if not new_status or new_status.user.id != context.bot.id:
             return
         chat = chat_member.chat
         if chat.type not in {"group", "supergroup"}:
+            return
+        if old_status and old_status.status not in {"left", "kicked"}:
             return
         commands = (
             "Добро пожаловать в чат-казино! 🤖\n"
