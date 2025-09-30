@@ -1156,15 +1156,32 @@ class CasinoBot:
         spin_texts: list[str] = ["🏴‍☠️ Бесплатные вращения начались!", ""]
         frame_delay = 1.0
 
-        for i in range(1, count + 1):
+        spins_left = count
+        spin_index = 0
+
+        while spins_left > 0:
+            spin_index += 1
+            spins_left -= 1
+
             temp_symbols = [rng.choice(machine.reel) for _ in range(3)]
-            frame_line = f"Вращение {i}: [ {' | '.join(temp_symbols)} ]"
+            frame_line = f"Вращение {spin_index}: [ {' | '.join(temp_symbols)} ]"
             spin_texts.append(frame_line)
             if base_message:
                 await self._safe_edit(base_message, "\n".join(spin_texts))
             await asyncio.sleep(frame_delay)
 
-            outcome = machine.spin(0, rng, jackpot_balance=0)
+            chosen_outcome = None
+            for attempt in range(2):
+                attempt_outcome = machine.spin(0, rng, jackpot_balance=0)
+                if (
+                    chosen_outcome is None
+                    or attempt_outcome.winnings > chosen_outcome.winnings
+                ):
+                    chosen_outcome = attempt_outcome
+                if attempt_outcome.winnings > 0 or attempt_outcome.free_spins > 0:
+                    chosen_outcome = attempt_outcome
+                    break
+            outcome = chosen_outcome if chosen_outcome else machine.spin(0, rng, jackpot_balance=0)
             bonus_line_text: str | None = None
             bonus_amount = 0
             if outcome.winnings:
@@ -1183,6 +1200,11 @@ class CasinoBot:
             spin_texts.append(result_line)
             if bonus_line_text:
                 spin_texts.append(f"→ {bonus_line_text}")
+            if outcome.free_spins > 0:
+                spins_left += outcome.free_spins
+                spin_texts.append(
+                    f"→ Дополнительные бесплатные вращения: +{outcome.free_spins}"
+                )
             await with_db(
                 self.db.record_spin,
                 telegram_id,
