@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import time
 from typing import Sequence
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -18,6 +20,9 @@ from telegram.ext import (
 from .config import Settings
 from .database import CasinoDatabase, User
 from .env import load_dotenv
+
+
+logger = logging.getLogger(__name__)
 
 
 async def with_db(op, *args, **kwargs):
@@ -247,7 +252,8 @@ class CasinoBot:
         final_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
         for _ in range(2):
             temp_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
-            await spin_message.edit_text(f"[ {' | '.join(temp_symbols)} ]")
+            if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
+                break
             await asyncio.sleep(0.5)
 
         multiplier = self._payout_multiplier(tuple(final_symbols))
@@ -258,7 +264,9 @@ class CasinoBot:
             new_balance = balance_after_bet
 
         result_text = self._build_slots_result_text(final_symbols, winnings, new_balance)
-        await spin_message.edit_text(result_text)
+        edited = await self._safe_edit(spin_message, result_text)
+        if not edited:
+            await message.reply_text(result_text)
 
     async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_member = update.my_chat_member
@@ -316,6 +324,14 @@ class CasinoBot:
         if len(set(symbols)) == 2:
             return f"{header}\nДва совпадения! Вы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
         return f"{header}\nВы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
+
+    async def _safe_edit(self, message, text: str) -> bool:
+        try:
+            await message.edit_text(text)
+            return True
+        except TelegramError as exc:
+            logger.debug("Failed to edit message: %s", exc)
+            return False
 
 
 def build_application(
