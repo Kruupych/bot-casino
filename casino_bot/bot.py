@@ -8,7 +8,7 @@ import time
 from typing import Sequence
 
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -54,6 +54,7 @@ class CasinoBot:
     def __init__(self, db: CasinoDatabase, settings: Settings) -> None:
         self.db = db
         self.settings = settings
+        self._slot_lock = asyncio.Lock()
 
     def register(self, application: Application) -> None:
         application.add_handler(CommandHandler("start_casino", self.start_casino))
@@ -220,55 +221,54 @@ class CasinoBot:
         if message is None or tg_user is None:
             return
 
-        user = await with_db(self.db.get_user, tg_user.id)
-        if not user:
-            await message.reply_text("Сначала зарегистрируйтесь командой /start_casino.")
-            return
-        await self._sync_username(tg_user, user)
+        async with self._slot_lock:
+            user = await with_db(self.db.get_user, tg_user.id)
+            if not user:
+                await self._safe_reply(message, "Сначала зарегистрируйтесь командой /start_casino.")
+                return
+            await self._sync_username(tg_user, user)
 
-        if context.args:
+            if context.args:
+                try:
+                    bet = int(context.args[0])
+                except ValueError:
+                    await self._safe_reply(message, "Ставка должна быть положительным числом.")
+                    return
+            else:
+                auto_bet = int(user.balance * 0.05)
+                bet = max(1, min(1000, auto_bet if auto_bet > 0 else 1))
+
+            if bet <= 0:
+                await self._safe_reply(message, "Ставка должна быть положительным числом.")
+                return
+
             try:
-                bet = int(context.args[0])
+                balance_after_bet = await with_db(self.db.adjust_balance, tg_user.id, -bet)
             except ValueError:
-                await message.reply_text("Ставка должна быть положительным числом.")
-                return
-        else:
-            bet = max(1, min(1000, max(1, int(user.balance * 0.05))))
-            if bet == 0:
-                await message.reply_text("Недостаточно фишек для автоматической ставки.")
+                await self._safe_reply(message, "Недостаточно фишек для этой ставки.")
                 return
 
-        if bet <= 0:
-            await message.reply_text("Ставка должна быть положительным числом.")
-            return
+            spin_message = await self._safe_reply(message, "🎰 Крутим барабан...", reply=False)
+            await asyncio.sleep(0.6)
 
-        try:
-            balance_after_bet = await with_db(self.db.adjust_balance, tg_user.id, -bet)
-        except ValueError:
-            await message.reply_text("Недостаточно фишек для этой ставки.")
-            return
+            if spin_message:
+                temp_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
+                if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
+                    spin_message = None
 
-        spin_message = await message.reply_text("🎰 Крутим барабан...")
-        await asyncio.sleep(0.8)
+            final_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
 
-        final_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
-        for _ in range(2):
-            temp_symbols = [random.choice(self.settings.slot_reel) for _ in range(3)]
-            if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
-                break
-            await asyncio.sleep(0.5)
+            multiplier = self._payout_multiplier(tuple(final_symbols))
+            winnings = bet * multiplier
+            if winnings:
+                new_balance = await with_db(self.db.adjust_balance, tg_user.id, winnings)
+            else:
+                new_balance = balance_after_bet
 
-        multiplier = self._payout_multiplier(tuple(final_symbols))
-        winnings = bet * multiplier
-        if winnings:
-            new_balance = await with_db(self.db.adjust_balance, tg_user.id, winnings)
-        else:
-            new_balance = balance_after_bet
-
-        result_text = self._build_slots_result_text(final_symbols, winnings, new_balance)
-        edited = await self._safe_edit(spin_message, result_text)
-        if not edited:
-            await message.reply_text(result_text)
+            result_text = self._build_slots_result_text(final_symbols, winnings, new_balance)
+            if spin_message and await self._safe_edit(spin_message, result_text):
+                return
+            await self._safe_reply(message, result_text)
 
     async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_member = update.my_chat_member
@@ -327,13 +327,28 @@ class CasinoBot:
             return f"{header}\nДва совпадения! Вы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
         return f"{header}\nВы выиграли {winnings} фишек. Ваш баланс: {new_balance} фишек."
 
+    async def _safe_reply(self, message, text: str, *, reply: bool = True):
+        for attempt in range(3):
+            try:
+                return await message.reply_text(text, quote=reply)
+            except RetryAfter as exc:
+                await asyncio.sleep(exc.retry_after + 0.1)
+            except TelegramError as exc:
+                logger.debug("Failed to send reply: %s", exc)
+                break
+        return None
+
     async def _safe_edit(self, message, text: str) -> bool:
-        try:
-            await message.edit_text(text)
-            return True
-        except TelegramError as exc:
-            logger.debug("Failed to edit message: %s", exc)
-            return False
+        for attempt in range(3):
+            try:
+                await message.edit_text(text)
+                return True
+            except RetryAfter as exc:
+                await asyncio.sleep(exc.retry_after + 0.1)
+            except TelegramError as exc:
+                logger.debug("Failed to edit message: %s", exc)
+                break
+        return False
 
 
 def build_application(
