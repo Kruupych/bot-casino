@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from .config import Settings
-from .slots import FruitMachine, PharaohMachine, SlotMachine
+from .slots import FruitMachine, PharaohMachine, PirateMachine, SlotMachine
 
 
 class MachineFactory:
@@ -28,6 +28,8 @@ class MachineFactory:
         if machine_type == "pharaoh":
             jackpot_percent = self._as_float(cfg.get("jackpot_percent"), 0.01)
             machine = PharaohMachine(jackpot_percent=jackpot_percent)
+        elif machine_type == "pirate":
+            machine = PirateMachine()
         else:
             reel = self._normalize_reel(cfg.get("reel"))
             payouts = self._normalize_payouts(cfg.get("special_payouts"))

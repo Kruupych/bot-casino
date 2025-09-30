@@ -309,8 +309,19 @@ class CasinoBot:
                     final_lines.append("; ".join(info_parts))
             final_text = "\n".join(final_lines)
             if spin_message and await self._safe_edit(spin_message, final_text):
-                return
-            await self._safe_reply(message, final_text)
+                edited_message = spin_message
+            else:
+                edited_message = await self._safe_reply(message, final_text)
+
+            if outcome.free_spins > 0:
+                await self._run_free_spins(
+                    message,
+                    machine,
+                    outcome.free_spins,
+                    tg_user.id,
+                    self._rng,
+                    base_message=edited_message,
+                )
 
     async def jackpot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
@@ -433,6 +444,47 @@ class CasinoBot:
                 logger.debug("Failed to edit message: %s", exc)
                 break
         return False
+
+    async def _run_free_spins(
+        self,
+        original_message,
+        machine: SlotMachine,
+        count: int,
+        telegram_id: int,
+        rng,
+        base_message=None,
+    ) -> None:
+        total_winnings = 0
+        spin_texts: list[str] = ["🏴‍☠️ Бесплатные вращения начались!", ""]
+        frame_delay = 1.0
+
+        for i in range(1, count + 1):
+            temp_symbols = [rng.choice(machine.reel) for _ in range(3)]
+            frame_line = f"Вращение {i}: [ {' | '.join(temp_symbols)} ]"
+            spin_texts.append(frame_line)
+            if base_message:
+                await self._safe_edit(base_message, "\n".join(spin_texts))
+            await asyncio.sleep(frame_delay)
+
+            outcome = machine.spin(0, rng, jackpot_balance=0)
+            if outcome.winnings:
+                await with_db(self.db.adjust_balance, telegram_id, outcome.winnings)
+                total_winnings += outcome.winnings
+            result_line = (
+                f"→ {outcome.message.split('\n')[1]}" if "\n" in outcome.message else f"→ {outcome.message}"
+            )
+            spin_texts.append(result_line)
+            if base_message:
+                await self._safe_edit(base_message, "\n".join(spin_texts))
+            await asyncio.sleep(0.2)
+
+        summary = f"Бесплатные вращения завершены! Общий выигрыш: {total_winnings} фишек."
+        spin_texts.append("")
+        spin_texts.append(summary)
+        final_text = "\n".join(spin_texts)
+        if base_message and await self._safe_edit(base_message, final_text):
+            return
+        await self._safe_reply(original_message, final_text, reply=False)
 
 
 def build_application(
