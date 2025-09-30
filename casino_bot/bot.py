@@ -740,16 +740,16 @@ class CasinoBot:
                 jackpot_balance = await with_db(self.db.add_to_jackpot, machine.key, contribution)
 
             spin_message = await self._safe_reply(message, f"🎰 {machine.title}: вращаем барабаны...", reply=False)
-            frame_delay = 0.9
+            frame_delay = 1.0
             if spin_message:
-                for _ in range(3):
+                for _ in range(2):
                     await asyncio.sleep(frame_delay)
                     temp_symbols = [self._rng.choice(machine.reel) for _ in range(3)]
                     if not await self._safe_edit(spin_message, f"[ {' | '.join(temp_symbols)} ]"):
                         spin_message = None
                         break
             else:
-                await asyncio.sleep(frame_delay * 3)
+                await asyncio.sleep(frame_delay * 2)
 
             outcome = machine.spin(bet, self._rng, jackpot_balance=jackpot_balance)
             new_balance = balance_after_bet
