@@ -124,6 +124,7 @@ class WildJackpotMachine(SlotMachine):
         jackpot_message: str | None = None,
         title: str | None = None,
         description: str | None = None,
+        jackpot_seed: int = 0,
     ) -> None:
         reel = tuple(reel or ("🐍", "🐞", "👁️", "🏺", wild_symbol))
         super().__init__(reel)
@@ -146,6 +147,7 @@ class WildJackpotMachine(SlotMachine):
             jackpot_message
             or "👑 Главный приз! Вы забираете джекпот в {jackpot} фишек + базовый выигрыш {base} (итого {total})."
         )
+        self.jackpot_seed = max(0, jackpot_seed)
         if title:
             self.title = title
         if description:

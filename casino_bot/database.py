@@ -202,11 +202,12 @@ class CasinoDatabase:
                 (machine_key,),
             ).fetchone()
             if current is None:
+                seed = max(amount, self._jackpot_seed(machine_key))
                 conn.execute(
                     "INSERT INTO jackpots (machine_key, amount) VALUES (?, ?)",
-                    (machine_key, amount),
+                    (machine_key, seed),
                 )
-                return amount
+                return seed
             new_amount = current["amount"] + amount
             conn.execute(
                 "UPDATE jackpots SET amount = ? WHERE machine_key = ?",
@@ -221,9 +222,10 @@ class CasinoDatabase:
                 (machine_key,),
             ).fetchone()
             amount = row["amount"] if row else 0
+            seed = self._jackpot_seed(machine_key)
             conn.execute(
-                "REPLACE INTO jackpots (machine_key, amount) VALUES (?, 0)",
-                (machine_key,),
+                "REPLACE INTO jackpots (machine_key, amount) VALUES (?, ?)",
+                (machine_key, seed),
             )
             return amount
 
@@ -233,4 +235,32 @@ class CasinoDatabase:
                 "SELECT amount FROM jackpots WHERE machine_key = ?",
                 (machine_key,),
             ).fetchone()
-            return row["amount"] if row else 0
+            if row is not None:
+                return row["amount"]
+        seed = self._jackpot_seed(machine_key)
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO jackpots (machine_key, amount) VALUES (?, ?)",
+                (machine_key, seed),
+            )
+        return seed
+
+    def _jackpot_seed(self, machine_key: str) -> int:
+        seeds = self._jackpot_seeds
+        return max(0, int(seeds.get(machine_key, 0)))
+
+    @property
+    def _jackpot_seeds(self) -> dict[str, int]:
+        try:
+            from .config import Settings
+
+            seeds = {}
+            for cfg in Settings.from_env().slot_machines:
+                key = (cfg.get("key") or cfg.get("type") or "").lower()
+                if not key:
+                    continue
+                if cfg.get("type") in {"pharaoh", "wild", "jackpot"}:
+                    seeds[key] = int(cfg.get("jackpot_seed", cfg.get("start_jackpot", 0)))
+            return seeds
+        except Exception:
+            return {}

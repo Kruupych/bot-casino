@@ -51,7 +51,7 @@ class MachineFactory:
         return machine
 
     def _create_wild_machine(self, cfg: dict[str, Any]) -> SlotMachine:
-        jackpot_percent = self._as_float(cfg.get("jackpot_percent"), 0.01)
+        jackpot_percent = self._as_float(cfg.get("jackpot_percent"), 0.05)
         reel = self._normalize_reel(cfg.get("reel"))
         wild_symbol = str(cfg.get("wild_symbol", "🗿"))
         triple = self._normalize_symbol_map(
@@ -64,6 +64,7 @@ class MachineFactory:
         )
         jackpot_multiplier = int(cfg.get("jackpot_multiplier", 60))
         jackpot_message = cfg.get("jackpot_message")
+        seed = int(cfg.get("jackpot_seed", cfg.get("start_jackpot", 5000)))
         return WildJackpotMachine(
             reel,
             wild_symbol=wild_symbol,
@@ -74,6 +75,7 @@ class MachineFactory:
             jackpot_message=jackpot_message,
             title=cfg.get("title"),
             description=cfg.get("description"),
+            jackpot_seed=seed,
         )
 
     def _normalize_reel(self, raw) -> Sequence[str]:
