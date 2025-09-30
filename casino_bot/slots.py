@@ -264,8 +264,20 @@ class PirateMachine(SlotMachine):
             counts = {symbol: symbols.count(symbol) for symbol in set(symbols) if symbol != self._scatter}
             for symbol, count in counts.items():
                 if count == 2:
-                    winnings = bet * 2
-                    return winnings, f"Пара {symbol}! Вы выиграли {winnings} фишек.", 0, {}
+                    pair_multiplier = {
+                        "🏴‍☠️": 4,
+                        "🦜": 3,
+                        "💣": 3,
+                        "💎": 2,
+                        "⚓": 2,
+                    }.get(symbol, 2)
+                    winnings = bet * pair_multiplier
+                    return (
+                        winnings,
+                        f"Пара {symbol}! Вы выиграли {winnings} фишек.",
+                        0,
+                        {},
+                    )
 
         return 0, "Шторма бушуют – пока без выигрыша!", 0, {}
 
