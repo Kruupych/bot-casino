@@ -5,8 +5,6 @@ import logging
 import os
 import random
 import time
-from typing import Sequence
-
 from telegram import Update
 from telegram.error import RetryAfter, TelegramError
 from telegram.ext import (
@@ -20,7 +18,8 @@ from telegram.ext import (
 from .config import Settings
 from .database import CasinoDatabase, User
 from .env import load_dotenv
-from .slots import FruitMachine, PharaohMachine, SlotMachine
+from .machine_factory import MachineFactory
+from .slots import SlotMachine
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +67,7 @@ class CasinoBot:
         application.add_handler(CommandHandler("daily", self.daily))
         application.add_handler(CommandHandler("give", self.give))
         application.add_handler(CommandHandler(["slots", "s"], self.slots))
+        application.add_handler(CommandHandler(["jackpot", "jp"], self.jackpot))
         application.add_handler(ChatMemberHandler(self.welcome_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
     async def _sync_username(self, telegram_user, record: User | None) -> None:
@@ -312,6 +312,25 @@ class CasinoBot:
                 return
             await self._safe_reply(message, final_text)
 
+    async def jackpot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.message
+        if message is None:
+            return
+
+        jackpots: list[str] = []
+        for machine in self._slot_machines.values():
+            if not machine.supports_jackpot():
+                continue
+            amount = await with_db(self.db.get_jackpot, machine.key)
+            jackpots.append(f"• {machine.title}: {amount:,} фишек".replace(",", " "))
+
+        if not jackpots:
+            await self._safe_reply(message, "Сейчас нет активных прогрессивных джекпотов.")
+            return
+
+        text = "\n".join(["💰 Активные джекпоты в казино:", "", *jackpots])
+        await self._safe_reply(message, text, reply=False)
+
     async def welcome_new_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_member = update.my_chat_member
         if chat_member is None:
@@ -338,92 +357,10 @@ class CasinoBot:
         await context.bot.send_message(chat.id, commands)
 
     def _configure_machines(self) -> None:
-        machines: dict[str, SlotMachine] = {}
-        for cfg in self.settings.slot_machines:
-            machine = self._create_machine_from_config(cfg)
-            machines[machine.key] = machine
-        if not machines:
-            fruit = FruitMachine(self.settings.slot_reel, self.settings.special_payouts)
-            machines[fruit.key] = fruit
+        factory = MachineFactory(self.settings)
+        machines = factory.create_all()
         self._slot_machines = machines
         self._default_slot_key = next(iter(machines))
-
-    def _create_machine_from_config(self, cfg: dict) -> SlotMachine:
-        machine_type = (cfg.get("type") or cfg.get("key") or "").lower()
-        key = (cfg.get("key") or machine_type).lower()
-        if not key:
-            raise ValueError("Slot machine config must include 'key'")
-        if machine_type == "pharaoh":
-            try:
-                jackpot_percent = float(cfg.get("jackpot_percent", 0.01))
-            except (TypeError, ValueError):
-                jackpot_percent = 0.01
-            machine = PharaohMachine(jackpot_percent=jackpot_percent)
-        else:
-            reel = self._normalize_reel(cfg.get("reel"))
-            payouts = self._normalize_payouts(cfg.get("special_payouts"))
-            machine = FruitMachine(reel, payouts)
-        machine.key = key
-        if "title" in cfg:
-            machine.title = cfg["title"]
-        if "description" in cfg:
-            machine.description = cfg["description"]
-        return machine
-
-    def _normalize_reel(self, raw) -> Sequence[str]:
-        if not raw:
-            return tuple(self.settings.slot_reel)
-        if isinstance(raw, (list, tuple)):
-            return tuple(str(item) for item in raw if str(item))
-        if isinstance(raw, str):
-            parts = [part.strip() for part in raw.split(",") if part.strip()]
-            if parts:
-                return tuple(parts)
-        return tuple(self.settings.slot_reel)
-
-    def _normalize_payouts(self, raw) -> dict[tuple[str, str, str], int]:
-        if not raw:
-            return dict(self.settings.special_payouts)
-        result: dict[tuple[str, str, str], int] = {}
-        if isinstance(raw, dict):
-            for key, value in raw.items():
-                triplet = self._normalize_triplet(key)
-                if triplet is None:
-                    continue
-                try:
-                    result[triplet] = int(value)
-                except (TypeError, ValueError):
-                    continue
-        elif isinstance(raw, list):
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                triplet = self._normalize_triplet(item.get("symbols"))
-                if triplet is None:
-                    continue
-                try:
-                    multiplier = int(item.get("multiplier"))
-                except (TypeError, ValueError):
-                    continue
-                result[triplet] = multiplier
-        if not result:
-            return dict(self.settings.special_payouts)
-        return result
-
-    def _normalize_triplet(self, raw) -> tuple[str, str, str] | None:
-        if isinstance(raw, (list, tuple)) and len(raw) == 3:
-            return tuple(str(item) for item in raw)
-        if isinstance(raw, str):
-            cleaned = raw.strip().strip("[]")
-            if "," in cleaned:
-                parts = [part.strip().strip('"').strip("'") for part in cleaned.split(",") if part.strip()]
-                if len(parts) == 3:
-                    return tuple(parts)
-            if len(cleaned) >= 3:
-                chars = list(cleaned)
-                if len(chars) >= 3:
-                    return tuple(chars[:3])
-        return None
 
     def _parse_slot_arguments(self, args: list[str]) -> tuple[str, str | None]:
         machine_key = self._default_slot_key
